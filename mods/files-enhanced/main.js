@@ -1,0 +1,396 @@
+// Enhanced file browser for Herdr with support for docx, pdf, pptx, binary files and native actions.
+import { View, div, svg } from "gpui-kit";
+import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
+
+function location() {
+  const space = spaces().find(s => s.active), f = focused();
+  const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
+  const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
+  return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+}
+const key = () => JSON.stringify(location());
+const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
+const PER_FOLDER = 500, TOTAL = 5000;
+
+function formatBytes(bytes) {
+  if (!bytes || isNaN(bytes)) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getFileCategory(filename) {
+  const ext = filename.includes(".") ? filename.split(".").pop().toLowerCase() : "";
+  if (["pdf"].includes(ext)) return { type: "pdf", label: "PDF Document", canExtract: true, badge: "PDF", color: "#e11d48" };
+  if (["docx", "doc", "rtf", "odt"].includes(ext)) return { type: "doc", label: "Word Document", canExtract: true, badge: "DOC", color: "#2563eb" };
+  if (["pptx", "ppt", "odp"].includes(ext)) return { type: "presentation", label: "PowerPoint Presentation", canExtract: true, badge: "PPT", color: "#ea580c" };
+  if (["xlsx", "xls", "ods"].includes(ext)) return { type: "spreadsheet", label: "Excel Spreadsheet", canExtract: false, badge: "XLS", color: "#16a34a" };
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "heic"].includes(ext)) return { type: "image", label: "Image File", canExtract: false, badge: "IMG", color: "#9333ea" };
+  if (["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "dmg", "pkg"].includes(ext)) return { type: "archive", label: "Archive / Package", canExtract: false, badge: "ZIP", color: "#d97706" };
+  if (["mp4", "mov", "avi", "mkv", "webm", "mp3", "wav", "flac", "m4a", "ogg"].includes(ext)) return { type: "media", label: "Media Audio/Video", canExtract: false, badge: "MEDIA", color: "#0891b2" };
+  if (["app", "exe", "bin", "dylib", "so", "dll", "o"].includes(ext)) return { type: "binary", label: "Binary Executable", canExtract: false, badge: "BIN", color: "#64748b" };
+  return null;
+}
+
+async function directory(path, on) {
+  const windowsDirectory = async () => {
+    const r = await exec("powershell", ["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $_.LinkType -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) } }) | ConvertTo-Json -Compress } '" + path.replace(/['‘’‚‛]/g, "$&$&") + "'"], { on });
+    if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder");
+    const result = JSON.parse(r.stdout || "[]");
+    return Array.isArray(result) ? result : [result];
+  };
+  if (!on && window()?.platform === "windows") return windowsDirectory();
+  const script = 'n=0; for p in "$1"/* "$1"/.[!.]* "$1"/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; name=${p##*/}; [ "$name" = .git ] && continue; if [ -d "$p" ]; then kind=d; else kind=f; fi; printf "%s\\0%s\\0" "$kind" "$name"; n=$((n+1)); [ "$n" -gt 500 ] && break; done; test -d "$1"';
+  let r;
+  try { r = await exec("sh", ["-c", script, "files", path], { on }); }
+  catch (e) {
+    if (on && String(e).includes("cannot start sh: program not found")) return windowsDirectory();
+    throw e;
+  }
+  if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder");
+  const fields = r.stdout.split("\0"), out = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) out.push({ name: fields[i + 1], dir: fields[i] === "d" });
+  return out;
+}
+
+export default class FilesEnhanced extends View {
+  init(_props, cx) {
+    this.saved = new Map();
+    this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.copied = false;
+    this.refresh(cx);
+    cx.timer.every(10000, cx => this.refresh(cx));
+  }
+
+  watch(root, cx) {
+    if (this.on || this.watched === root) return;
+    this.watched = root;
+    const context = this.context;
+    cx.spawn(async cx => {
+      try { while (this.context === context) { await watchFolder(root); if (this.current(context)) this.refresh(cx); } }
+      catch { if (this.context === context) this.watched = null; }
+    });
+  }
+
+  current(context) {
+    return this.context === context && key() === context.key;
+  }
+
+  async loadFolder(path, context) {
+    const { on, cwd: root } = context;
+    const entries = await directory(path ? `${root}/${path}` : root, on);
+    if (!this.current(context) || (path && !this.folders.has(path))) return;
+    const used = [...this.entries.entries()].filter(([p]) => p !== path).reduce((n, [, e]) => n + e.length, 0);
+    this.entries.set(path, entries.slice(0, Math.max(0, Math.min(PER_FOLDER, TOTAL - used))).sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name)));
+    if (entries.length > PER_FOLDER || used + entries.length > TOTAL) this.limited = true;
+  }
+
+  refresh(cx) {
+    const { cwd, on } = location(), next = key();
+    if (next !== this.context?.key) {
+      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
+      const saved = this.saved.get(next);
+      this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
+      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
+      this.loading = false;
+      if (saved?.file) this.show(saved.file, cx);
+    }
+    if (!cwd || this.loading) return;
+    const context = this.context;
+    this.loading = true;
+    this.limited = false;
+    cx.spawn(async cx => {
+      try {
+        for (const path of ["", ...this.folders]) {
+          if (!this.current(context)) return;
+          await this.loadFolder(path, context);
+        }
+        const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
+        const marks = {};
+        if (top?.code === 0) {
+          const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd, on }).catch(() => null);
+          if (status?.code === 0) for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
+            const xy = entry.slice(0, 2);
+            marks[`${top.stdout.trim()}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
+          }
+        }
+        if (!this.current(context)) return;
+        this.marks = marks; this.error = null; this.watch(cwd, cx);
+      } catch (e) { if (this.current(context)) this.error = String(e); }
+      finally { if (this.context === context) this.loading = false; cx.notify(); }
+    });
+  }
+
+  toggle(path, cx) {
+    if (this.folders.has(path)) {
+      for (const folder of [...this.folders]) if (folder === path || folder.startsWith(path + "/")) {
+        this.folders.delete(folder);
+        this.entries.delete(folder);
+      }
+    } else {
+      this.folders.add(path);
+      if (!this.entries.has(path) && !this.pending.has(path)) {
+        const context = this.context;
+        this.pending.add(path);
+        cx.spawn(async cx => {
+          try { await this.loadFolder(path, context); }
+          catch (e) { if (this.current(context)) this.error = String(e); }
+          finally { if (this.context === context) this.pending.delete(path); cx.notify(); }
+        });
+      }
+    }
+    cx.notify();
+  }
+
+  async extractText(fullPath, ext, on) {
+    try {
+      if (ext === "pdf") {
+        const r = await exec("pdftotext", ["-layout", "-nopgbrk", "-l", "50", fullPath, "-"], { on }).catch(() => null);
+        if (r?.code === 0 && r.stdout?.trim()) return { text: r.stdout, label: "PDF Document (Extracted Text)" };
+      } else if (["docx", "doc", "rtf", "odt"].includes(ext)) {
+        const r = await exec("textutil", ["-convert", "txt", "-stdout", fullPath], { on }).catch(() => null);
+        if (r?.code === 0 && r.stdout?.trim()) return { text: r.stdout, label: "Word Document (Extracted Text)" };
+        const pyScript = "import zipfile, xml.etree.ElementTree as ET, sys\ntry:\n  with zipfile.ZipFile(sys.argv[1]) as z:\n    tree = ET.fromstring(z.read('word/document.xml'))\n    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}\n    p = [''.join(t.text for t in node.findall('.//w:t', ns) if t.text) for node in tree.findall('.//w:p', ns)]\n    print('\\n\\n'.join(x for x in p if x))\nexcept: sys.exit(1)";
+        const py = await exec("python3", ["-c", pyScript, fullPath], { on }).catch(() => null);
+        if (py?.code === 0 && py.stdout?.trim()) return { text: py.stdout, label: "Word Document (Extracted Text)" };
+      } else if (["pptx", "ppt"].includes(ext)) {
+        const pyScript = "import zipfile, xml.etree.ElementTree as ET, sys\ntry:\n  with zipfile.ZipFile(sys.argv[1]) as z:\n    slides = sorted([n for n in z.namelist() if n.startswith('ppt/slides/slide') and n.endswith('.xml')], key=lambda x: int(''.join(c for c in x if c.isdigit()) or 0))\n    ns = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}\n    out = []\n    for idx, s in enumerate(slides, 1):\n      tree = ET.fromstring(z.read(s))\n      texts = [t.text for t in tree.findall('.//a:t', ns) if t.text]\n      if texts:\n        out.append(f'--- Slide {idx} ---\\n' + '\\n'.join(texts))\n    print('\\n\\n'.join(out))\nexcept: sys.exit(1)";
+        const py = await exec("python3", ["-c", pyScript, fullPath], { on }).catch(() => null);
+        if (py?.code === 0 && py.stdout?.trim()) return { text: py.stdout, label: "PowerPoint Presentation (Extracted Text)" };
+      }
+    } catch {}
+    return null;
+  }
+
+  show(path, cx) {
+    this.code?.release(); this.code = null; this.file = path; this.fileError = null;
+    this.isBinary = false; this.fileSize = null; this.category = null; this.isExtracted = false; this.extractedLabel = null;
+    if (!path || !cx) return;
+    const context = this.context, root = this.root, on = this.on;
+    const fullPath = `${root}/${path}`;
+    const ext = path.includes(".") ? path.split(".").pop().toLowerCase() : "";
+    const category = getFileCategory(path);
+
+    cx.spawn(async cx => {
+      try {
+        if (category?.canExtract) {
+          const extracted = await this.extractText(fullPath, ext, on);
+          if (this.file !== path || !this.current(context)) return;
+          if (extracted?.text) {
+            const t = theme();
+            this.isExtracted = true;
+            this.extractedLabel = extracted.label;
+            this.category = category;
+            this.code = EditorState.new({
+              language: "markdown",
+              readonly: true,
+              value: extracted.text.length > 400000 ? extracted.text.slice(0, 400000) + "\n… (truncated)" : extracted.text,
+              font_family: settings().font_family,
+              font_size: 12,
+              syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 }
+            });
+            cx.notify();
+            return;
+          }
+        }
+
+        let text = null;
+        try {
+          text = await readTextFile(fullPath, { on });
+        } catch {
+          text = null;
+        }
+
+        if (this.file !== path || !this.current(context)) return;
+
+        if (text !== null && !text.includes("\0")) {
+          const t = theme(), lang = LANG[ext] ?? ext;
+          this.code = EditorState.new({
+            language: lang,
+            readonly: true,
+            value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
+            font_family: settings().font_family,
+            font_size: 12,
+            syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 }
+          });
+        } else {
+          this.isBinary = true;
+          this.category = category ?? { type: "binary", label: "Binary File", badge: "BIN", color: "#64748b" };
+          const statFlag = window()?.platform === "linux" ? "-c%s" : "-f%z";
+          const statRes = await exec("stat", [statFlag, fullPath], { on }).catch(() => null);
+          if (statRes?.code === 0) {
+            const bytes = parseInt(statRes.stdout.trim(), 10);
+            this.fileSize = formatBytes(bytes);
+          }
+        }
+      } catch (err) {
+        if (this.file === path && this.current(context)) {
+          this.isBinary = true;
+          this.category = category ?? { type: "binary", label: "Binary File", badge: "BIN", color: "#64748b" };
+        }
+      } finally {
+        cx.notify();
+      }
+    });
+  }
+
+  openWithDefaultApp(cx) {
+    if (!this.file || !this.root) return;
+    const fullPath = `${this.root}/${this.file}`, on = this.on;
+    cx.spawn(async () => {
+      const plat = window()?.platform;
+      if (plat === "windows") {
+        await exec("powershell", ["-NoProfile", "-Command", `Start-Process -LiteralPath '${fullPath.replace(/'/g, "''")}'`], { on }).catch(() => null);
+      } else if (plat === "linux") {
+        await exec("xdg-open", [fullPath], { on }).catch(() => null);
+      } else {
+        await exec("open", [fullPath], { on }).catch(() => null);
+      }
+    });
+  }
+
+  quickLook(cx) {
+    if (!this.file || !this.root) return;
+    const fullPath = `${this.root}/${this.file}`, on = this.on;
+    cx.spawn(async () => {
+      const plat = window()?.platform;
+      if (plat === "windows" || plat === "linux") {
+        this.openWithDefaultApp(cx);
+      } else {
+        await exec("sh", ["-c", 'qlmanage -p "$1" >/dev/null 2>&1 &', "ql", fullPath], { on }).catch(() => null);
+      }
+    });
+  }
+
+  revealInFinder(cx) {
+    if (!this.file || !this.root) return;
+    const fullPath = `${this.root}/${this.file}`, on = this.on;
+    cx.spawn(async () => {
+      const plat = window()?.platform;
+      if (plat === "windows") {
+        await exec("explorer.exe", [`/select,${fullPath}`], { on }).catch(() => null);
+      } else if (plat === "linux") {
+        const folder = fullPath.substring(0, fullPath.lastIndexOf("/"));
+        await exec("xdg-open", [folder], { on }).catch(() => null);
+      } else {
+        await exec("open", ["-R", fullPath], { on }).catch(() => null);
+      }
+    });
+  }
+
+  copyFullPath(cx) {
+    if (!this.file || !this.root) return;
+    const fullPath = `${this.root}/${this.file}`, on = this.on;
+    cx.spawn(async cx => {
+      const plat = window()?.platform;
+      if (plat === "macos") {
+        await exec("sh", ["-c", 'printf "%s" "$1" | pbcopy', "copy", fullPath], { on }).catch(() => null);
+      } else if (plat === "windows") {
+        await exec("powershell", ["-NoProfile", "-Command", `Set-Clipboard -Value '${fullPath.replace(/'/g, "''")}'`], { on }).catch(() => null);
+      } else {
+        await exec("sh", ["-c", 'printf "%s" "$1" | xclip -selection clipboard 2>/dev/null || printf "%s" "$1" | xsel -b', "copy", fullPath], { on }).catch(() => null);
+      }
+      this.copied = true;
+      cx.notify();
+      cx.spawn(async cx => {
+        await exec("sleep", ["2"]).catch(() => null);
+        this.copied = false;
+        cx.notify();
+      });
+    });
+  }
+
+  rows(prefix, depth, out, t) {
+    if (out.length >= TOTAL || depth > 40) return out;
+    for (const entry of this.entries.get(prefix) ?? []) {
+      if (out.length >= TOTAL) break;
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
+      const category = !entry.dir ? getFileCategory(entry.name) : null;
+      out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
+        .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
+        .child(entry.dir ? svg(`mods/files-enhanced/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
+        .child(svg(`mods/files-enhanced/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(entry.dir ? t.muted : (category ? category.color : t.muted)))
+        .child(div().flex_1().min_w(0).truncate().child(entry.name))
+        .when(Boolean(category), el => el.child(div().text_size(9).px(4).py(1).rounded(3).bg(t.raised).text_color(category.color).child(category.badge)))
+        .when(Boolean(mark), el => el.child(div().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark))));
+      if (entry.dir && open) this.rows(path, depth + 1, out, t);
+    }
+    return out;
+  }
+
+  render(cx) {
+    if (key() !== this.context?.key) this.refresh(cx);
+    const t = theme(), plat = window()?.platform ?? "macos";
+    const fullPath = this.file ? `${this.root}/${this.file}` : "";
+
+    return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+      .child(h_flex().h(42).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border)
+        .when(Boolean(this.file), el => el.child(div().id("files-back").w(24).h(24).rounded(4).cursor_pointer().hover(s => s.bg(t.hover)).items_center().justify_center().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
+        .child(div().font_semibold().child("Files"))
+        .when(Boolean(this.isExtracted), el => el.child(div().text_size(10).px(6).py(2).rounded(4).bg(t.raised).text_color(t.accent).child("Extracted Text")))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
+        .when(Boolean(this.file), el => el
+          .child(h_flex().gap(4).flex_none()
+            .child(div().id("btn-open-top").px(6).py(2).rounded(4).bg(t.raised).hover(s => s.bg(t.hover)).cursor_pointer().text_size(11).on_click((_e, cx) => this.openWithDefaultApp(cx)).child("Open ↗"))
+            .when(plat === "macos", el2 => el2.child(div().id("btn-ql-top").px(6).py(2).rounded(4).bg(t.raised).hover(s => s.bg(t.hover)).cursor_pointer().text_size(11).on_click((_e, cx) => this.quickLook(cx)).child("Quick Look 👁")))
+          )))
+      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+        .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
+        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
+      .when(Boolean(this.file && this.code), el => el.child(
+        v_flex().size_full().min_h(0)
+          .when(Boolean(this.isExtracted), el2 => el2.child(
+            h_flex().px(12).py(6).bg(t.raised).border_b(1).border_color(t.border).items_center().justify_between().gap(8)
+              .child(div().text_size(11).text_color(t.muted).child("Previewing text extracted from " + (this.category?.label ?? "document")))
+              .child(h_flex().gap(6)
+                .child(div().px(6).py(1).rounded(4).bg(t.solid).text_color(t.solid_foreground).cursor_pointer().text_size(10).hover(s => s.bg(t.accent)).on_click((_e, cx) => this.openWithDefaultApp(cx)).child("Open Original ↗"))
+                .when(plat === "macos", el3 => el3.child(div().px(6).py(1).rounded(4).bg(t.hover).cursor_pointer().text_size(10).on_click((_e, cx) => this.quickLook(cx)).child("Quick Look 👁")))
+              )
+          ))
+          .child(Editor.new(this.code).flex_1().min_h(0))
+      ))
+      .when(Boolean(this.file && this.isBinary && !this.code), el => el.child(
+        v_flex().size_full().min_h(0).p(16).items_center().justify_center().gap(14)
+          .child(
+            v_flex().w_full().max_w(340).p(20).rounded(12).bg(t.surface).border_1().border_color(t.border).gap(14).items_center()
+              .child(
+                h_flex().w(52).h(52).rounded(10).bg(this.category?.color ?? t.accent).items_center().justify_center()
+                  .child(div().text_size(16).font_semibold().text_color("#ffffff").child(this.category?.badge ?? "FILE"))
+              )
+              .child(
+                v_flex().items_center().gap(4)
+                  .child(div().font_semibold().text_size(14).truncate().child(this.file.split("/").pop() ?? ""))
+                  .child(div().text_size(12).text_color(t.muted).child(this.category?.label ?? "Binary Document"))
+                  .when(Boolean(this.fileSize), el2 => el2.child(div().text_size(11).text_color(t.dim).child(`Size: ${this.fileSize}`)))
+              )
+              .child(
+                v_flex().w_full().gap(8).pt(4)
+                  .child(
+                    h_flex().id("btn-open-primary").h(34).w_full().rounded(7).bg(t.solid).text_color(t.solid_foreground).items_center().justify_center().gap(6).cursor_pointer().hover(s => s.bg(t.accent))
+                      .on_click((_e, cx) => this.openWithDefaultApp(cx))
+                      .child(div().font_semibold().text_size(12).child("Open with Default Application ↗"))
+                  )
+                  .when(plat === "macos", el2 => el2.child(
+                    h_flex().id("btn-quicklook").h(32).w_full().rounded(7).bg(t.raised).text_color(t.foreground).border_1().border_color(t.border).items_center().justify_center().gap(6).cursor_pointer().hover(s => s.bg(t.hover))
+                      .on_click((_e, cx) => this.quickLook(cx))
+                      .child(div().text_size(12).child("Quick Look Preview 👁"))
+                  ))
+                  .child(
+                    h_flex().id("btn-finder").h(32).w_full().rounded(7).bg(t.raised).text_color(t.foreground).border_1().border_color(t.border).items_center().justify_center().gap(6).cursor_pointer().hover(s => s.bg(t.hover))
+                      .on_click((_e, cx) => this.revealInFinder(cx))
+                      .child(div().text_size(12).child(plat === "macos" ? "Reveal in Finder 📂" : "Reveal in Folder 📂"))
+                  )
+                  .child(
+                    h_flex().id("btn-copy-path").h(28).w_full().rounded(7).items_center().justify_center().cursor_pointer().hover(s => s.bg(t.hover))
+                      .on_click((_e, cx) => this.copyFullPath(cx))
+                      .child(div().text_size(11).text_color(this.copied ? t.ansi2 : t.muted).child(this.copied ? "✓ Path copied to clipboard!" : "Copy Full Path 📋"))
+                  )
+              )
+          )
+      ))
+      .when(Boolean(this.file && !this.code && !this.isBinary), el => el.child(
+        div().p(16).text_color(t.dim).child(this.fileError || "Loading file…")
+      ));
+  }
+}
