@@ -1,7 +1,7 @@
-// Enhanced file browser for Herdr with support for docx, pdf, pptx, binary files and native actions.
+// Enhanced file browser for Herdr with support for docx, pdf, pptx, binary files, native actions and context menus.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, run } from "herdr";
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -59,6 +59,10 @@ export default class FilesEnhanced extends View {
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.copied = false;
+    this.contextMenu = null;
+    this.toastNotice = null;
+    this.size = { width: 360, height: 600 };
+    this.handle = cx.focus_handle();
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
   }
@@ -68,35 +72,46 @@ export default class FilesEnhanced extends View {
     this.watched = root;
     const context = this.context;
     cx.spawn(async cx => {
-      try { while (this.context === context) { await watchFolder(root); if (this.current(context)) this.refresh(cx); } }
-      catch { if (this.context === context) this.watched = null; }
+      try {
+        while (this.watched === root) {
+          await watchFolder(root);
+          if (this.watched === root && this.current(context)) this.refresh(cx);
+        }
+      } catch {
+        if (this.current(context)) this.watched = null;
+      }
     });
   }
 
   current(context) {
-    return this.context === context && key() === context.key;
+    return this.context === context && key() === context?.key;
   }
 
   async loadFolder(path, context) {
-    const { on, cwd: root } = context;
-    const entries = await directory(path ? `${root}/${path}` : root, on);
-    if (!this.current(context) || (path && !this.folders.has(path))) return;
-    const used = [...this.entries.entries()].filter(([p]) => p !== path).reduce((n, [, e]) => n + e.length, 0);
-    this.entries.set(path, entries.slice(0, Math.max(0, Math.min(PER_FOLDER, TOTAL - used))).sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name)));
-    if (entries.length > PER_FOLDER || used + entries.length > TOTAL) this.limited = true;
+    const root = this.root, on = this.on;
+    const full = path ? `${root}/${path}` : root;
+    const items = await directory(full, on);
+    if (!this.current(context)) return;
+    items.sort((a, b) => a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1);
+    this.entries.set(path, items);
   }
 
   refresh(cx) {
-    const { cwd, on } = location(), next = key();
-    if (next !== this.context?.key) {
-      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
-      const saved = this.saved.get(next);
-      this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
-      this.loading = false;
-      if (saved?.file) this.show(saved.file, cx);
+    if (this.loading) return;
+    const { cwd, on, space } = location(), k = key();
+    if (k !== this.context?.key) {
+      if (this.context?.space) this.saved.set(this.context.space, { folders: this.folders, file: this.file });
+      const prev = space ? this.saved.get(space) : null;
+      this.context = { key: k, space };
+      this.root = cwd; this.on = on; this.watched = null;
+      this.entries.clear(); this.pending.clear();
+      this.folders = new Set(prev?.folders ?? []);
+      this.file = prev?.file ?? null;
+      this.code?.release(); this.code = null; this.isBinary = false; this.fileSize = null; this.category = null;
+      this.contextMenu = null;
+      if (this.file) this.show(this.file, cx);
     }
-    if (!cwd || this.loading) return;
+    if (!cwd) { this.root = null; cx.notify(); return; }
     const context = this.context;
     this.loading = true;
     this.limited = false;
@@ -235,9 +250,10 @@ export default class FilesEnhanced extends View {
     });
   }
 
-  openWithDefaultApp(cx) {
-    if (!this.file || !this.root) return;
-    const fullPath = `${this.root}/${this.file}`, on = this.on;
+  openWithDefaultApp(targetPath, cx) {
+    const fullPath = targetPath ? (targetPath.startsWith("/") ? targetPath : `${this.root}/${targetPath}`) : `${this.root}/${this.file}`;
+    if (!fullPath) return;
+    const on = this.on;
     cx.spawn(async () => {
       const plat = window()?.platform;
       if (plat === "windows") {
@@ -250,22 +266,24 @@ export default class FilesEnhanced extends View {
     });
   }
 
-  quickLook(cx) {
-    if (!this.file || !this.root) return;
-    const fullPath = `${this.root}/${this.file}`, on = this.on;
+  quickLook(targetPath, cx) {
+    const fullPath = targetPath ? (targetPath.startsWith("/") ? targetPath : `${this.root}/${targetPath}`) : `${this.root}/${this.file}`;
+    if (!fullPath) return;
+    const on = this.on;
     cx.spawn(async () => {
       const plat = window()?.platform;
       if (plat === "windows" || plat === "linux") {
-        this.openWithDefaultApp(cx);
+        this.openWithDefaultApp(targetPath, cx);
       } else {
         await exec("sh", ["-c", 'qlmanage -p "$1" >/dev/null 2>&1 &', "ql", fullPath], { on }).catch(() => null);
       }
     });
   }
 
-  revealInFinder(cx) {
-    if (!this.file || !this.root) return;
-    const fullPath = `${this.root}/${this.file}`, on = this.on;
+  revealInFinder(targetPath, cx) {
+    const fullPath = targetPath ? (targetPath.startsWith("/") ? targetPath : `${this.root}/${targetPath}`) : `${this.root}/${this.file}`;
+    if (!fullPath) return;
+    const on = this.on;
     cx.spawn(async () => {
       const plat = window()?.platform;
       if (plat === "windows") {
@@ -279,26 +297,55 @@ export default class FilesEnhanced extends View {
     });
   }
 
-  copyFullPath(cx) {
-    if (!this.file || !this.root) return;
-    const fullPath = `${this.root}/${this.file}`, on = this.on;
+  copyToClipboard(text, label, cx) {
+    if (!text) return;
+    const on = this.on;
     cx.spawn(async cx => {
       const plat = window()?.platform;
       if (plat === "macos") {
-        await exec("sh", ["-c", 'printf "%s" "$1" | pbcopy', "copy", fullPath], { on }).catch(() => null);
+        await exec("sh", ["-c", 'printf "%s" "$1" | pbcopy', "copy", text], { on }).catch(() => null);
       } else if (plat === "windows") {
-        await exec("powershell", ["-NoProfile", "-Command", `Set-Clipboard -Value '${fullPath.replace(/'/g, "''")}'`], { on }).catch(() => null);
+        await exec("powershell", ["-NoProfile", "-Command", `Set-Clipboard -Value '${text.replace(/'/g, "''")}'`], { on }).catch(() => null);
       } else {
-        await exec("sh", ["-c", 'printf "%s" "$1" | xclip -selection clipboard 2>/dev/null || printf "%s" "$1" | xsel -b', "copy", fullPath], { on }).catch(() => null);
+        await exec("sh", ["-c", 'printf "%s" "$1" | xclip -selection clipboard 2>/dev/null || printf "%s" "$1" | xsel -b', "copy", text], { on }).catch(() => null);
       }
+      this.toastNotice = label || "Copied to clipboard!";
       this.copied = true;
       cx.notify();
-      cx.spawn(async cx => {
-        await exec("sleep", ["2"]).catch(() => null);
+      cx.timer.after(2000, cx => {
+        this.toastNotice = null;
         this.copied = false;
         cx.notify();
       });
     });
+  }
+
+  openContextMenu(entry, path, pos, cx) {
+    const panelWidth = this.size?.width ?? 340;
+    const panelHeight = this.size?.height ?? 600;
+    const menuWidth = 230;
+    const menuHeight = entry.dir ? 220 : 280;
+
+    let x = Math.max(8, Math.min(pos.x ?? 80, panelWidth - menuWidth - 12));
+    let y = Math.max(36, Math.min(pos.y ?? 120, panelHeight - menuHeight - 12));
+
+    this.contextMenu = {
+      path,
+      fullPath: `${this.root}/${path}`,
+      isDir: entry.dir,
+      name: entry.name,
+      category: !entry.dir ? getFileCategory(entry.name) : null,
+      x,
+      y
+    };
+    cx.notify();
+  }
+
+  closeContextMenu(cx) {
+    if (this.contextMenu) {
+      this.contextMenu = null;
+      cx.notify();
+    }
   }
 
   rows(prefix, depth, out, t) {
@@ -307,16 +354,116 @@ export default class FilesEnhanced extends View {
       if (out.length >= TOTAL) break;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       const category = !entry.dir ? getFileCategory(entry.name) : null;
-      out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
-        .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
-        .child(entry.dir ? svg(`mods/files-enhanced/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
-        .child(svg(`mods/files-enhanced/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(entry.dir ? t.muted : (category ? category.color : t.muted)))
-        .child(div().flex_1().min_w(0).truncate().child(entry.name))
-        .when(Boolean(category), el => el.child(div().text_size(9).px(4).py(1).rounded(3).bg(t.raised).text_color(category.color).child(category.badge)))
-        .when(Boolean(mark), el => el.child(div().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark))));
+      const isSelected = this.file === path || this.contextMenu?.path === path;
+
+      out.push(
+        h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 16).pr(6).gap(6).items_center().rounded(6).cursor_pointer()
+          .when(isSelected, s => s.bg(t.selected))
+          .when(!isSelected, s => s.hover(h => h.bg(t.hover)))
+          // Left click: toggle folder or preview file
+          .on_click((_e, cx) => {
+            this.closeContextMenu(cx);
+            entry.dir ? this.toggle(path, cx) : this.show(path, cx);
+          })
+          // Right click: open context menu!
+          .on_mouse_down("right", (e, cx) => {
+            cx.stop_propagation();
+            const pos = e.position ?? { x: 100, y: 150 };
+            this.openContextMenu(entry, path, pos, cx);
+          })
+          .child(entry.dir ? svg(`mods/files-enhanced/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
+          .child(svg(`mods/files-enhanced/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(entry.dir ? t.muted : (category ? category.color : t.muted)))
+          .child(div().flex_1().min_w(0).text_size(12.5).truncate().child(entry.name))
+          .when(Boolean(category), el => el.child(div().text_size(9).px(4).py(0.5).rounded(3).bg(t.raised).text_color(category.color).child(category.badge)))
+          .when(Boolean(mark), el => el.child(div().text_size(10.5).font_semibold().text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark)))
+          // Dedicated "···" Context Menu button (visible on hover)
+          .child(
+            div().id(`btn-dots-${path}`).size(18).flex_none().flex().items_center().justify_center().rounded(4)
+              .hover(s => s.bg(t.raised))
+              .on_mouse_down("left", (e, cx) => {
+                cx.stop_propagation();
+                const pos = e.position ?? { x: 120, y: 150 };
+                this.openContextMenu(entry, path, pos, cx);
+              })
+              .child(svg("mods/files-enhanced/dots.svg").size(12).text_color(t.dim))
+          )
+      );
       if (entry.dir && open) this.rows(path, depth + 1, out, t);
     }
     return out;
+  }
+
+  // Render Context Menu Dropdown / Popover
+  renderContextMenu(t, plat) {
+    const ctx = this.contextMenu;
+    if (!ctx) return div();
+
+    const menuItem = (id, iconSvg, label, action, isDanger = false) =>
+      h_flex().id(id).h(27).px(8).gap(7).items_center().rounded(5).cursor_pointer()
+        .hover(s => s.bg(t.hover))
+        .on_click((_e, cx) => {
+          this.closeContextMenu(cx);
+          action(cx);
+        })
+        .child(svg(iconSvg).size(13).flex_none().text_color(isDanger ? t.ansi1 : t.muted))
+        .child(div().text_size(11.5).text_color(isDanger ? t.ansi1 : t.foreground).truncate().child(label));
+
+    const divider = () => div().h(1).my(3).bg(t.border);
+
+    return div().id("ctx-layer").absolute().inset_0()
+      // Transparent backdrop click catcher: dismisses context menu on click anywhere outside
+      .child(
+        div().id("ctx-backdrop").absolute().inset_0().cursor_default()
+          .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.closeContextMenu(cx); })
+          .on_mouse_down("right", (e, cx) => { cx.stop_propagation(); this.closeContextMenu(cx); })
+      )
+      // Popover Menu Frame
+      .child(
+        v_flex().id("ctx-popover").absolute().top(ctx.y).left(ctx.x).w(226).p(5).gap(1).rounded(8)
+          .bg(t.popover ?? t.surface).border_1().border_color(t.border).shadow_lg().text_color(t.foreground)
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          // Header: Entry Name & Type
+          .child(
+            h_flex().px(8).py(5).gap(6).items_center().rounded(4).bg(t.raised)
+              .child(svg(`mods/files-enhanced/${ctx.isDir ? "folder" : "file"}.svg`).size(13).text_color(ctx.category ? ctx.category.color : t.muted))
+              .child(div().flex_1().min_w(0).font_semibold().text_size(11.5).truncate().child(ctx.name))
+              .when(Boolean(ctx.category), el => el.child(div().text_size(9).px(3).py(0.5).rounded(3).bg(t.surface).text_color(ctx.category.color).child(ctx.category.badge)))
+          )
+          .child(divider())
+
+          // Context Actions for FILES
+          .when(!ctx.isDir, el => el
+            .child(menuItem("ctx-preview", "mods/files-enhanced/file.svg", "Preview in Panel", (cx) => this.show(ctx.path, cx)))
+            .child(menuItem("ctx-default-app", "mods/files-enhanced/external.svg", "Open with Default App ↗", (cx) => this.openWithDefaultApp(ctx.fullPath, cx)))
+            .when(plat === "macos", el2 => el2.child(menuItem("ctx-quicklook", "mods/files-enhanced/file.svg", "Quick Look 👁", (cx) => this.quickLook(ctx.fullPath, cx))))
+            .child(menuItem("ctx-finder", "mods/files-enhanced/folder.svg", plat === "macos" ? "Reveal in Finder 📂" : "Reveal in File Manager 📂", (cx) => this.revealInFinder(ctx.fullPath, cx)))
+            .child(divider())
+            .child(menuItem("ctx-term-folder", "mods/files-enhanced/terminal.svg", "Open Folder in Terminal Tab", (cx) => {
+              const folder = ctx.fullPath.substring(0, ctx.fullPath.lastIndexOf("/"));
+              run("tab.new", { folder });
+            }))
+            .child(menuItem("ctx-split-right", "mods/files-enhanced/terminal.svg", "Split Terminal Right Here", (cx) => {
+              const folder = ctx.fullPath.substring(0, ctx.fullPath.lastIndexOf("/"));
+              run("pane.split", { direction: "right", folder });
+            }))
+            .child(divider())
+            .child(menuItem("ctx-copy-rel", "mods/files-enhanced/copy.svg", "Copy Relative Path", (cx) => this.copyToClipboard(ctx.path, "Copied relative path!", cx)))
+            .child(menuItem("ctx-copy-abs", "mods/files-enhanced/copy.svg", "Copy Full Absolute Path", (cx) => this.copyToClipboard(ctx.fullPath, "Copied full path!", cx)))
+          )
+
+          // Context Actions for FOLDERS
+          .when(ctx.isDir, el => el
+            .child(menuItem("ctx-term-tab", "mods/files-enhanced/terminal.svg", "Open in New Terminal Tab", (_cx) => run("tab.new", { folder: ctx.fullPath })))
+            .child(menuItem("ctx-term-right", "mods/files-enhanced/terminal.svg", "Split Terminal Right Here", (_cx) => run("pane.split", { direction: "right", folder: ctx.fullPath })))
+            .child(menuItem("ctx-term-down", "mods/files-enhanced/terminal.svg", "Split Terminal Down Here", (_cx) => run("pane.split", { direction: "down", folder: ctx.fullPath })))
+            .child(divider())
+            .child(menuItem("ctx-open-folder", "mods/files-enhanced/external.svg", plat === "macos" ? "Open in Finder 📂" : "Open in File Manager 📂", (cx) => this.openWithDefaultApp(ctx.fullPath, cx)))
+            .child(menuItem("ctx-copy-rel-dir", "mods/files-enhanced/copy.svg", "Copy Relative Path", (cx) => this.copyToClipboard(ctx.path, "Copied relative folder path!", cx)))
+            .child(menuItem("ctx-copy-abs-dir", "mods/files-enhanced/copy.svg", "Copy Full Absolute Path", (cx) => this.copyToClipboard(ctx.fullPath, "Copied full folder path!", cx)))
+            .child(divider())
+            .child(menuItem("ctx-toggle-dir", `mods/files-enhanced/chevron-${this.folders.has(ctx.path) ? "down" : "right"}.svg`, this.folders.has(ctx.path) ? "Collapse Folder" : "Expand Folder", (cx) => this.toggle(ctx.path, cx)))
+          )
+      );
   }
 
   render(cx) {
@@ -324,32 +471,56 @@ export default class FilesEnhanced extends View {
     const t = theme(), plat = window()?.platform ?? "macos";
     const fullPath = this.file ? `${this.root}/${this.file}` : "";
 
-    return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
-      .child(h_flex().h(42).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border)
-        .when(Boolean(this.file), el => el.child(div().id("files-back").w(24).h(24).rounded(4).cursor_pointer().hover(s => s.bg(t.hover)).items_center().justify_center().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
-        .child(div().font_semibold().child("Files"))
-        .when(Boolean(this.isExtracted), el => el.child(div().text_size(10).px(6).py(2).rounded(4).bg(t.raised).text_color(t.accent).child("Extracted Text")))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
+    return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).relative().track_focus(this.handle)
+      .on_size_change((size, cx) => {
+        this.size = size;
+        cx.notify();
+      })
+      .on_key_down((e, cx) => {
+        if (e.key === "escape") {
+          if (this.contextMenu) {
+            this.closeContextMenu(cx);
+            cx.stop_propagation();
+          } else if (this.file) {
+            this.show(null, cx);
+            cx.stop_propagation();
+          }
+        }
+      })
+
+      // Top Toolbar Header
+      .child(h_flex().h(40).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border).bg(t.chrome)
+        .when(Boolean(this.file), el => el.child(div().id("files-back").size(22).rounded(4).cursor_pointer().hover(s => s.bg(t.hover)).flex().items_center().justify_center().text_color(t.muted).on_click((_e, cx) => { this.show(null, cx); }).child("←")))
+        .child(div().font_semibold().text_size(13).child("Files"))
+        .when(Boolean(this.isExtracted), el => el.child(div().text_size(10).px(5).py(1).rounded(4).bg(t.raised).text_color(t.accent).child("Extracted Text")))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(11.5).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
+        .when(Boolean(this.toastNotice), el => el.child(div().text_size(10.5).px(6).py(1).rounded(4).bg(t.raised).text_color(t.ansi2).child(this.toastNotice)))
         .when(Boolean(this.file), el => el
           .child(h_flex().gap(4).flex_none()
-            .child(div().id("btn-open-top").px(6).py(2).rounded(4).bg(t.raised).hover(s => s.bg(t.hover)).cursor_pointer().text_size(11).on_click((_e, cx) => this.openWithDefaultApp(cx)).child("Open ↗"))
-            .when(plat === "macos", el2 => el2.child(div().id("btn-ql-top").px(6).py(2).rounded(4).bg(t.raised).hover(s => s.bg(t.hover)).cursor_pointer().text_size(11).on_click((_e, cx) => this.quickLook(cx)).child("Quick Look 👁")))
+            .child(div().id("btn-open-top").px(6).py(1.5).rounded(4).bg(t.raised).hover(s => s.bg(t.hover)).cursor_pointer().text_size(11).on_click((_e, cx) => this.openWithDefaultApp(this.file, cx)).child("Open ↗"))
+            .when(plat === "macos", el2 => el2.child(div().id("btn-ql-top").px(6).py(1.5).rounded(4).bg(t.raised).hover(s => s.bg(t.hover)).cursor_pointer().text_size(11).on_click((_e, cx) => this.quickLook(this.file, cx)).child("Quick Look 👁")))
           )))
-      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+
+      // File Tree List View
+      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(5).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
+
+      // File Preview (Text Editor)
       .when(Boolean(this.file && this.code), el => el.child(
         v_flex().size_full().min_h(0)
           .when(Boolean(this.isExtracted), el2 => el2.child(
             h_flex().px(12).py(6).bg(t.raised).border_b(1).border_color(t.border).items_center().justify_between().gap(8)
               .child(div().text_size(11).text_color(t.muted).child("Previewing text extracted from " + (this.category?.label ?? "document")))
               .child(h_flex().gap(6)
-                .child(div().px(6).py(1).rounded(4).bg(t.solid).text_color(t.solid_foreground).cursor_pointer().text_size(10).hover(s => s.bg(t.accent)).on_click((_e, cx) => this.openWithDefaultApp(cx)).child("Open Original ↗"))
-                .when(plat === "macos", el3 => el3.child(div().px(6).py(1).rounded(4).bg(t.hover).cursor_pointer().text_size(10).on_click((_e, cx) => this.quickLook(cx)).child("Quick Look 👁")))
+                .child(div().px(6).py(1).rounded(4).bg(t.solid).text_color(t.solid_foreground).cursor_pointer().text_size(10).hover(s => s.bg(t.accent)).on_click((_e, cx) => this.openWithDefaultApp(this.file, cx)).child("Open Original ↗"))
+                .when(plat === "macos", el3 => el3.child(div().px(6).py(1).rounded(4).bg(t.hover).cursor_pointer().text_size(10).on_click((_e, cx) => this.quickLook(this.file, cx)).child("Quick Look 👁")))
               )
           ))
           .child(Editor.new(this.code).flex_1().min_h(0))
       ))
+
+      // Binary Document Card
       .when(Boolean(this.file && this.isBinary && !this.code), el => el.child(
         v_flex().size_full().min_h(0).p(16).items_center().justify_center().gap(14)
           .child(
@@ -368,22 +539,22 @@ export default class FilesEnhanced extends View {
                 v_flex().w_full().gap(8).pt(4)
                   .child(
                     h_flex().id("btn-open-primary").h(34).w_full().rounded(7).bg(t.solid).text_color(t.solid_foreground).items_center().justify_center().gap(6).cursor_pointer().hover(s => s.bg(t.accent))
-                      .on_click((_e, cx) => this.openWithDefaultApp(cx))
+                      .on_click((_e, cx) => this.openWithDefaultApp(this.file, cx))
                       .child(div().font_semibold().text_size(12).child("Open with Default Application ↗"))
                   )
                   .when(plat === "macos", el2 => el2.child(
                     h_flex().id("btn-quicklook").h(32).w_full().rounded(7).bg(t.raised).text_color(t.foreground).border_1().border_color(t.border).items_center().justify_center().gap(6).cursor_pointer().hover(s => s.bg(t.hover))
-                      .on_click((_e, cx) => this.quickLook(cx))
+                      .on_click((_e, cx) => this.quickLook(this.file, cx))
                       .child(div().text_size(12).child("Quick Look Preview 👁"))
                   ))
                   .child(
                     h_flex().id("btn-finder").h(32).w_full().rounded(7).bg(t.raised).text_color(t.foreground).border_1().border_color(t.border).items_center().justify_center().gap(6).cursor_pointer().hover(s => s.bg(t.hover))
-                      .on_click((_e, cx) => this.revealInFinder(cx))
+                      .on_click((_e, cx) => this.revealInFinder(this.file, cx))
                       .child(div().text_size(12).child(plat === "macos" ? "Reveal in Finder 📂" : "Reveal in Folder 📂"))
                   )
                   .child(
                     h_flex().id("btn-copy-path").h(28).w_full().rounded(7).items_center().justify_center().cursor_pointer().hover(s => s.bg(t.hover))
-                      .on_click((_e, cx) => this.copyFullPath(cx))
+                      .on_click((_e, cx) => this.copyToClipboard(fullPath, "Copied full path!", cx))
                       .child(div().text_size(11).text_color(this.copied ? t.ansi2 : t.muted).child(this.copied ? "✓ Path copied to clipboard!" : "Copy Full Path 📋"))
                   )
               )
@@ -391,6 +562,9 @@ export default class FilesEnhanced extends View {
       ))
       .when(Boolean(this.file && !this.code && !this.isBinary), el => el.child(
         div().p(16).text_color(t.dim).child(this.fileError || "Loading file…")
-      ));
+      ))
+
+      // Context Menu Overlay Layer
+      .when(Boolean(this.contextMenu), _el => this.renderContextMenu(t, plat));
   }
 }

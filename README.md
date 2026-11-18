@@ -40,6 +40,10 @@ An enhanced replacement for Herdr's built-in `files` mod:
   - Displays formatted badge, file size, full path, and prominent action buttons for binary files (images, archives, executables, spreadsheets).
 - **File Type Badges in Tree**:
   - Color-coded badges for PDF, DOC, PPT, XLS, IMG, ZIP, BIN in the file list.
+- **Context Menus for Files & Folders**:
+  - Triggered via **Right-Click** or the dedicated **`···` menu button** on each row.
+  - **File Actions**: Preview in Panel, Open with Default App, Quick Look (macOS), Reveal in Finder / File Manager, Open Containing Folder in Terminal Tab, Split Terminal Right, Copy Relative Path, Copy Full Absolute Path.
+  - **Folder Actions**: Open in New Terminal Tab, Split Terminal Right, Split Terminal Down, Open in Finder / File Manager, Copy Relative Path, Copy Full Absolute Path, Expand/Collapse Folder.
 
 ### `changes-enhanced`
 An enhanced replacement for Herdr's built-in `changes` mod:
