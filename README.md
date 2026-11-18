@@ -7,12 +7,18 @@ Root workspace repository for custom Herdr mods, layouts, and integrations.
 ```
 herdr-extensions/
 ├── layouts/
-│   └── worklog.json                # Custom layout incorporating worklog & files-enhanced
+│   └── worklog.json                # Custom layout incorporating worklog, files-enhanced & changes-enhanced
 └── mods/
-    └── files-enhanced/             # Enhanced file explorer panel
-        ├── main.js                 # Mod entry point with text extraction & native actions
+    ├── files-enhanced/             # Enhanced file explorer panel
+    │   ├── main.js                 # Mod entry point with text extraction & native actions
+    │   ├── mod.json                # Placement configuration
+    │   ├── *.svg                   # UI Icons & chevrons
+    │   ├── jsconfig.json           # JS/TS Editor configuration
+    │   └── gpui-kit.d.ts           # GPUI type definitions
+    └── changes-enhanced/           # Enhanced Changes panel with SourceTree-style git commit graph
+        ├── main.js                 # Mod entry point with uncommitted changes & branch tree
         ├── mod.json                # Placement configuration
-        ├── *.svg                   # UI Icons & chevrons
+        ├── *.svg                   # Branch, tag, copy, refresh icons
         ├── jsconfig.json           # JS/TS Editor configuration
         └── gpui-kit.d.ts           # GPUI type definitions
 ```
@@ -34,6 +40,29 @@ An enhanced replacement for Herdr's built-in `files` mod:
   - Displays formatted badge, file size, full path, and prominent action buttons for binary files (images, archives, executables, spreadsheets).
 - **File Type Badges in Tree**:
   - Color-coded badges for PDF, DOC, PPT, XLS, IMG, ZIP, BIN in the file list.
+
+### `changes-enhanced`
+An enhanced replacement for Herdr's built-in `changes` mod:
+- **Dual Working Tree & Git Tree View**:
+  - View modes: **Split** (both), **Changes only**, or **Tree only** with collapsible sections.
+  - Full working tree changes (status, file list, syntax diff preview, commit message, commit button).
+- **SourceTree-style Git Graph & Branch History**:
+  - Colorful multi-lane commit tree (SourceTree color palette: blue, orange, green, purple, cyan, etc.).
+  - Distinguishes **HEAD** commit (outer ring + center dot), normal branch commits, and merge commits.
+  - Multi-parent merge branch connectors.
+  - **Ref Badges**:
+    - Local branches (blue pills with branch icon)
+    - Remote branches (orange/tan pills)
+    - Tags (green pills with tag icon)
+    - HEAD indicator
+  - SourceTree-compatible table columns:
+    - **Graph**: Vector lane lines and commit markers
+    - **Description**: Ref badges + commit message
+    - **Commit**: Short commit SHA with 1-click copy
+    - **Author**: Author name
+    - **Date**: Formatted timestamp (`YYYY-MM-DD HH:mm`)
+- **Interactive Commit Inspector**:
+  - Click any commit in the tree to expand full commit details, full 40-char SHA copy, author, relative date, and stat breakdown.
 
 ## Linking into Herdr
 
