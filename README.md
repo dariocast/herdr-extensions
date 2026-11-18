@@ -40,6 +40,12 @@ An enhanced replacement for Herdr's built-in `files` mod:
   - Displays formatted badge, file size, full path, and prominent action buttons for binary files (images, archives, executables, spreadsheets).
 - **File Type Badges in Tree**:
   - Color-coded badges for PDF, DOC, PPT, XLS, IMG, ZIP, BIN in the file list.
+- **In-Place Code / Text Editing & Saving**:
+  - Open any plain text or code file (`.js`, `.ts`, `.json`, `.md`, `.py`, `.yaml`, etc.) to edit directly in the panel.
+  - Full syntax highlighting, line numbers, code folding, and cursor selection.
+  - Real-time modification tracking with dirty state dot indicator (`●`).
+  - **Save Button**: Active state and feedback in the top toolbar.
+  - **Keyboard Shortcut**: Press `Cmd+S` (macOS) or `Ctrl+S` (Linux/Windows) to save changes atomically to disk.
 - **Context Menus for Files & Folders**:
   - Triggered via **Right-Click** or the dedicated **`···` menu button** on each row.
   - **File Actions**: Preview in Panel, Open with Default App, Quick Look (macOS), Reveal in Finder / File Manager, Open Containing Folder in Terminal Tab, Split Terminal Right, Copy Relative Path, Copy Full Absolute Path.

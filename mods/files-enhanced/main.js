@@ -1,7 +1,7 @@
-// Enhanced file browser for Herdr with support for docx, pdf, pptx, binary files, native actions and context menus.
+// Enhanced file browser for Herdr with support for docx, pdf, pptx, binary files, editing/saving, native actions and context menus.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, run } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, run } from "herdr";
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -63,6 +63,13 @@ export default class FilesEnhanced extends View {
     this.toastNotice = null;
     this.size = { width: 360, height: 600 };
     this.handle = cx.focus_handle();
+
+    // Editor & Saving state
+    this.savedValue = null;
+    this.isDirty = false;
+    this.saving = false;
+    this.saveError = null;
+
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
   }
@@ -109,6 +116,7 @@ export default class FilesEnhanced extends View {
       this.file = prev?.file ?? null;
       this.code?.release(); this.code = null; this.isBinary = false; this.fileSize = null; this.category = null;
       this.contextMenu = null;
+      this.savedValue = null; this.isDirty = false; this.saving = false; this.saveError = null;
       if (this.file) this.show(this.file, cx);
     }
     if (!cwd) { this.root = null; cx.notify(); return; }
@@ -181,6 +189,7 @@ export default class FilesEnhanced extends View {
   show(path, cx) {
     this.code?.release(); this.code = null; this.file = path; this.fileError = null;
     this.isBinary = false; this.fileSize = null; this.category = null; this.isExtracted = false; this.extractedLabel = null;
+    this.savedValue = null; this.isDirty = false; this.saving = false; this.saveError = null;
     if (!path || !cx) return;
     const context = this.context, root = this.root, on = this.on;
     const fullPath = `${root}/${path}`;
@@ -221,13 +230,26 @@ export default class FilesEnhanced extends View {
 
         if (text !== null && !text.includes("\0")) {
           const t = theme(), lang = LANG[ext] ?? ext;
+          this.savedValue = text;
+          this.isDirty = false;
           this.code = EditorState.new({
             language: lang,
-            readonly: true,
-            value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
+            readonly: false, // Editable text file!
+            value: text,
             font_family: settings().font_family,
             font_size: 12,
+            line_numbers: true,
+            folding: true,
             syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 }
+          });
+
+          // Track modifications (dirty state)
+          this.code.on("change", (_e, cx) => {
+            const dirty = this.code ? this.code.value() !== this.savedValue : false;
+            if (dirty !== this.isDirty) {
+              this.isDirty = dirty;
+              cx.notify();
+            }
           });
         } else {
           this.isBinary = true;
@@ -245,6 +267,72 @@ export default class FilesEnhanced extends View {
           this.category = category ?? { type: "binary", label: "Binary File", badge: "BIN", color: "#64748b" };
         }
       } finally {
+        cx.notify();
+      }
+    });
+  }
+
+  // Save changes to current text file
+  save(cx) {
+    if (!this.file || !this.code || this.saving || this.isExtracted || this.isBinary) return;
+    const fullPath = `${this.root}/${this.file}`;
+    const newContent = this.code.value();
+    const original = this.savedValue;
+    const on = this.on;
+    this.saving = true;
+    this.saveError = null;
+    cx.notify();
+
+    cx.spawn(async cx => {
+      try {
+        let written = false;
+        // 1. Try Herdr native atomic writeTextFile
+        if (!on) {
+          try {
+            await writeTextFile(fullPath, newContent, original);
+            written = true;
+          } catch {
+            try {
+              await writeTextFile(fullPath, newContent, null);
+              written = true;
+            } catch {}
+          }
+        }
+
+        // 2. Reliable fallback via Python / base64
+        if (!written) {
+          const b64 = btoa(unescape(encodeURIComponent(newContent)));
+          const plat = window()?.platform;
+          if (plat === "windows") {
+            const r = await exec("powershell", ["-NoProfile", "-Command", `[System.IO.File]::WriteAllBytes('${fullPath.replace(/'/g, "''")}', [System.Convert]::FromBase64String('${b64}'))`], { on });
+            if (r.code !== 0) throw new Error(r.stderr || "Save failed");
+          } else {
+            const pyScript = "import sys, base64\nwith open(sys.argv[2], 'wb') as f: f.write(base64.b64decode(sys.argv[1]))";
+            const r = await exec("python3", ["-c", pyScript, b64, fullPath], { on });
+            if (r.code !== 0) {
+              const shCmd = `printf "%s" "$1" | base64 -d 2>/dev/null || printf "%s" "$1" | base64 -D 2>/dev/null > "$2"`;
+              const shR = await exec("sh", ["-c", shCmd, "write", b64, fullPath], { on });
+              if (shR.code !== 0) throw new Error(r.stderr || shR.stderr || "Save failed");
+            }
+          }
+        }
+
+        this.savedValue = newContent;
+        this.isDirty = false;
+        this.toastNotice = "✓ File saved!";
+        cx.notify();
+        cx.timer.after(2000, cx => {
+          if (this.toastNotice === "✓ File saved!") {
+            this.toastNotice = null;
+            cx.notify();
+          }
+        });
+      } catch (err) {
+        this.saveError = String(err);
+        this.toastNotice = "Save failed!";
+        cx.notify();
+      } finally {
+        this.saving = false;
         cx.notify();
       }
     });
@@ -393,7 +481,7 @@ export default class FilesEnhanced extends View {
     return out;
   }
 
-  // Render Context Menu Dropdown / Popover
+  // Render Context Menu Dropover
   renderContextMenu(t, plat) {
     const ctx = this.contextMenu;
     if (!ctx) return div();
@@ -411,7 +499,7 @@ export default class FilesEnhanced extends View {
     const divider = () => div().h(1).my(3).bg(t.border);
 
     return div().id("ctx-layer").absolute().inset_0()
-      // Transparent backdrop click catcher: dismisses context menu on click anywhere outside
+      // Transparent backdrop click catcher
       .child(
         div().id("ctx-backdrop").absolute().inset_0().cursor_default()
           .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.closeContextMenu(cx); })
@@ -433,7 +521,7 @@ export default class FilesEnhanced extends View {
 
           // Context Actions for FILES
           .when(!ctx.isDir, el => el
-            .child(menuItem("ctx-preview", "mods/files-enhanced/file.svg", "Preview in Panel", (cx) => this.show(ctx.path, cx)))
+            .child(menuItem("ctx-preview", "mods/files-enhanced/file.svg", "Edit / View in Panel", (cx) => this.show(ctx.path, cx)))
             .child(menuItem("ctx-default-app", "mods/files-enhanced/external.svg", "Open with Default App ↗", (cx) => this.openWithDefaultApp(ctx.fullPath, cx)))
             .when(plat === "macos", el2 => el2.child(menuItem("ctx-quicklook", "mods/files-enhanced/file.svg", "Quick Look 👁", (cx) => this.quickLook(ctx.fullPath, cx))))
             .child(menuItem("ctx-finder", "mods/files-enhanced/folder.svg", plat === "macos" ? "Reveal in Finder 📂" : "Reveal in File Manager 📂", (cx) => this.revealInFinder(ctx.fullPath, cx)))
@@ -477,6 +565,12 @@ export default class FilesEnhanced extends View {
         cx.notify();
       })
       .on_key_down((e, cx) => {
+        // Cmd+S or Ctrl+S: Save file!
+        if ((e.modifiers.cmd || e.modifiers.ctrl) && e.key === "s") {
+          cx.stop_propagation();
+          this.save(cx);
+          return;
+        }
         if (e.key === "escape") {
           if (this.contextMenu) {
             this.closeContextMenu(cx);
@@ -493,10 +587,20 @@ export default class FilesEnhanced extends View {
         .when(Boolean(this.file), el => el.child(div().id("files-back").size(22).rounded(4).cursor_pointer().hover(s => s.bg(t.hover)).flex().items_center().justify_center().text_color(t.muted).on_click((_e, cx) => { this.show(null, cx); }).child("←")))
         .child(div().font_semibold().text_size(13).child("Files"))
         .when(Boolean(this.isExtracted), el => el.child(div().text_size(10).px(5).py(1).rounded(4).bg(t.raised).text_color(t.accent).child("Extracted Text")))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(11.5).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
-        .when(Boolean(this.toastNotice), el => el.child(div().text_size(10.5).px(6).py(1).rounded(4).bg(t.raised).text_color(t.ansi2).child(this.toastNotice)))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(11.5).text_color(this.isDirty ? t.foreground : t.dim)
+          .child(this.isDirty ? `● ${this.file}` : (this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
+        .when(Boolean(this.toastNotice), el => el.child(div().text_size(10.5).px(6).py(1).rounded(4).bg(t.raised).text_color(this.saveError ? t.ansi1 : t.ansi2).child(this.toastNotice)))
         .when(Boolean(this.file), el => el
           .child(h_flex().gap(4).flex_none()
+            // Save button for editable text files
+            .when(Boolean(this.code && !this.isExtracted), elSave => elSave.child(
+              h_flex().id("btn-save-file").h(26).px(8).gap(5).rounded(5).items_center().cursor_pointer()
+                .when(this.isDirty, s => s.bg(t.solid).text_color(t.solid_foreground))
+                .when(!this.isDirty, s => s.bg(t.raised).text_color(t.muted).hover(h => h.bg(t.hover).text_color(t.foreground)))
+                .on_click((_e, cx) => this.save(cx))
+                .child(svg("mods/files-enhanced/save.svg").size(12).text_color(this.isDirty ? t.solid_foreground : t.muted))
+                .child(div().text_size(11).font_medium().child(this.saving ? "Saving…" : this.isDirty ? "Save ●" : "Save"))
+            ))
             .child(div().id("btn-open-top").px(6).py(1.5).rounded(4).bg(t.raised).hover(s => s.bg(t.hover)).cursor_pointer().text_size(11).on_click((_e, cx) => this.openWithDefaultApp(this.file, cx)).child("Open ↗"))
             .when(plat === "macos", el2 => el2.child(div().id("btn-ql-top").px(6).py(1.5).rounded(4).bg(t.raised).hover(s => s.bg(t.hover)).cursor_pointer().text_size(11).on_click((_e, cx) => this.quickLook(this.file, cx)).child("Quick Look 👁")))
           )))
@@ -506,7 +610,7 @@ export default class FilesEnhanced extends View {
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
 
-      // File Preview (Text Editor)
+      // File Preview / Editor (Text Editor)
       .when(Boolean(this.file && this.code), el => el.child(
         v_flex().size_full().min_h(0)
           .when(Boolean(this.isExtracted), el2 => el2.child(
