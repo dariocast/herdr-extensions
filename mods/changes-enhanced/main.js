@@ -523,7 +523,7 @@ export default class ChangesEnhanced extends View {
         .when(Boolean(this.currentBranch), el =>
           el.child(h_flex().px(6).py(1).gap(4).rounded(4).bg(t.surface).border_1().border_color(t.border).items_center()
             .child(svg("mods/changes-enhanced/changes.svg").size(11).text_color(t.accent))
-            .child(div().text_size(11).font_mono().text_color(t.foreground).child(this.currentBranch)))
+            .child(div().text_size(11).font_family(settings().font_family ?? "JetBrains Mono").text_color(t.foreground).child(this.currentBranch)))
         )
         .when(Boolean(this.branchAheadBehind), el =>
           el.child(div().text_size(10).px(4).py(1).rounded(3).bg(t.raised).text_color(t.dim).child(this.branchAheadBehind))
@@ -624,7 +624,7 @@ export default class ChangesEnhanced extends View {
                     )
                     // Commit Hash Column
                     .child(h_flex().w(68).flex_none().items_center().gap(3)
-                      .child(div().text_size(11).font_mono().text_color(t.dim).child(c.short))
+                      .child(div().text_size(11).font_family(settings().font_family ?? "JetBrains Mono").text_color(t.dim).child(c.short))
                       .child(div().size(16).flex().items_center().justify_center().rounded(3).hover(s => s.bg(t.raised))
                         .on_click((e, cx) => { e.stop_propagation(); this.copyHash(c.hash, cx); })
                         .child(svg("mods/changes-enhanced/copy.svg").size(10).text_color(t.muted)))
@@ -645,7 +645,7 @@ export default class ChangesEnhanced extends View {
             v_flex().flex_none().max_h(120).p(8).gap(4).bg(t.raised).border_t(1).border_color(t.border).text_size(11)
               .child(h_flex().items_center().gap(8)
                 .child(div().font_semibold().text_color(t.accent).child(`Commit ${this.selectedCommit.short}`))
-                .child(div().text_color(t.dim).font_mono().text_size(10).child(this.selectedCommit.hash))
+                .child(div().text_color(t.dim).font_family(settings().font_family ?? "JetBrains Mono").text_size(10).child(this.selectedCommit.hash))
                 .child(div().id("copy-selected-hash").px(6).py(1).rounded(4).bg(t.surface).border_1().border_color(t.border).cursor_pointer()
                   .on_click((_e, cx) => this.copyHash(this.selectedCommit.hash, cx))
                   .child(this.copiedNotice ? "Copied!" : "Copy Full SHA"))

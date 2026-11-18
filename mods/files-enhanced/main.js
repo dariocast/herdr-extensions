@@ -145,6 +145,28 @@ export default class FilesEnhanced extends View {
     });
   }
 
+  refreshMarks(cx) {
+    const root = this.root, on = this.on, context = this.context;
+    if (!root || !this.current(context)) return;
+    cx.spawn(async cx => {
+      try {
+        const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: root, on }).catch(() => null);
+        if (top?.code === 0 && this.current(context)) {
+          const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on }).catch(() => null);
+          if (status?.code === 0 && this.current(context)) {
+            const marks = {};
+            for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
+              const xy = entry.slice(0, 2);
+              marks[`${top.stdout.trim()}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
+            }
+            this.marks = marks;
+            cx.notify();
+          }
+        }
+      } catch {}
+    });
+  }
+
   toggle(path, cx) {
     if (this.folders.has(path)) {
       for (const folder of [...this.folders]) if (folder === path || folder.startsWith(path + "/")) {
@@ -190,7 +212,14 @@ export default class FilesEnhanced extends View {
     this.code?.release(); this.code = null; this.file = path; this.fileError = null;
     this.isBinary = false; this.fileSize = null; this.category = null; this.isExtracted = false; this.extractedLabel = null;
     this.savedValue = null; this.isDirty = false; this.saving = false; this.saveError = null;
-    if (!path || !cx) return;
+    if (!path) {
+      if (cx) {
+        cx.notify();
+        this.refreshMarks(cx);
+      }
+      return;
+    }
+    if (!cx) return;
     const context = this.context, root = this.root, on = this.on;
     const fullPath = `${root}/${path}`;
     const ext = path.includes(".") ? path.split(".").pop().toLowerCase() : "";
@@ -319,8 +348,10 @@ export default class FilesEnhanced extends View {
 
         this.savedValue = newContent;
         this.isDirty = false;
+        if (this.file) this.marks[`${this.root}/${this.file}`] = "M";
         this.toastNotice = "✓ File saved!";
         cx.notify();
+        this.refreshMarks(cx);
         cx.timer.after(2000, cx => {
           if (this.toastNotice === "✓ File saved!") {
             this.toastNotice = null;
