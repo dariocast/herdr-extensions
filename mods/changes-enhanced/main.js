@@ -77,6 +77,8 @@ function calculateGraph(commits) {
 
   for (let i = 0; i < commits.length; i++) {
     const c = commits[i];
+
+    // 1. Determine lane for current commit
     let lane = activeLanes.indexOf(c.hash);
     if (lane === -1) {
       lane = activeLanes.indexOf(null);
@@ -89,44 +91,58 @@ function calculateGraph(commits) {
     }
 
     const lanesBefore = [...activeLanes];
-    const isHead = c.refs.some(r => r.isHead) || (i === 0 && !commits.some(x => x.refs.some(r => r.isHead)));
+    const outgoing = [];
 
-    const parentLanes = [];
+    // 2. Resolve parents and update lanes
     if (c.parents.length === 0) {
+      // Root commit terminates its lane
       activeLanes[lane] = null;
     } else {
-      // First parent continues on the current lane
-      activeLanes[lane] = c.parents[0];
-      parentLanes.push({ parent: c.parents[0], lane });
+      // Primary parent (p0) continues or joins
+      const p0 = c.parents[0];
+      const p0Existing = activeLanes.indexOf(p0);
+      if (p0Existing !== -1 && p0Existing !== lane) {
+        // Joins an already tracked lane -> current lane terminates here
+        activeLanes[lane] = null;
+        outgoing.push({ from: lane, to: p0Existing, type: "join" });
+      } else {
+        activeLanes[lane] = p0;
+        outgoing.push({ from: lane, to: lane, type: "straight" });
+      }
 
-      // Merged parent branches
+      // Secondary parents (p1, p2, ... for merge commits)
       for (let p = 1; p < c.parents.length; p++) {
-        const parentHash = c.parents[p];
-        let pLane = activeLanes.indexOf(parentHash);
-        if (pLane === -1) {
-          pLane = activeLanes.indexOf(null);
-          if (pLane === -1) {
-            pLane = activeLanes.length;
-            activeLanes.push(parentHash);
+        const pk = c.parents[p];
+        const pkExisting = activeLanes.indexOf(pk);
+        if (pkExisting !== -1) {
+          outgoing.push({ from: lane, to: pkExisting, type: "merge-join" });
+        } else {
+          let newLane = activeLanes.indexOf(null);
+          if (newLane === -1) {
+            newLane = activeLanes.length;
+            activeLanes.push(pk);
           } else {
-            activeLanes[pLane] = parentHash;
+            activeLanes[newLane] = pk;
           }
+          outgoing.push({ from: lane, to: newLane, type: "fork" });
         }
-        parentLanes.push({ parent: parentHash, lane: pLane });
       }
     }
 
+    // 3. Trim trailing null lanes so max width contracts when branches close
     while (activeLanes.length > 0 && activeLanes[activeLanes.length - 1] === null) {
       activeLanes.pop();
     }
     const lanesAfter = [...activeLanes];
+
+    const isHead = c.refs.some(r => r.isHead) || (i === 0 && !commits.some(x => x.refs.some(r => r.isHead)));
 
     graphRows.push({
       commit: c,
       lane,
       lanesBefore,
       lanesAfter,
-      parentLanes,
+      outgoing,
       isHead,
       isMerge: c.parents.length > 1
     });
@@ -151,6 +167,7 @@ export default class ChangesEnhanced extends View {
 
     // Section view states
     this.viewMode = "split"; // "split" | "changes" | "tree"
+    this.treeScope = "all"; // "all" | "current"
     this.changesCollapsed = false;
     this.currentBranch = "";
     this.branchAheadBehind = "";
@@ -246,13 +263,15 @@ export default class ChangesEnhanced extends View {
 
         // 3. Commit History & Graph (SourceTree style)
         if (head.code === 0) {
-          const logRes = await git([
+          const logArgs = [
             "log",
-            "-n", "75",
+            "-n", "85",
             "--date-order",
+            ...(this.treeScope === "all" ? ["--all"] : []),
             "--format=%H%x00%h%x00%p%x00%an%x00%ad%x00%ar%x00%s%x00%d",
             "--date=format:%Y-%m-%d %H:%M"
-          ]);
+          ];
+          const logRes = await git(logArgs);
           if (logRes.code === 0 && logRes.stdout.trim()) {
             const commitLines = logRes.stdout.trim().split("\n");
             const parsedCommits = [];
@@ -402,78 +421,84 @@ export default class ChangesEnhanced extends View {
   }
 
   // SourceTree-style vector Graph Cell (26px height)
-  renderGraphCell(row, t, laneWidth = 14) {
+  renderGraphCell(row, t, laneWidth = 16) {
     const lane = row.lane;
-    const laneX = lane * laneWidth + 10;
+    const laneX = lane * laneWidth + 14;
     const laneColor = LANE_COLORS[lane % LANE_COLORS.length];
-    const cellWidth = Math.max(50, (this.graph.maxLanes + 1) * laneWidth + 10);
+    const cellWidth = Math.max(64, (this.graph.maxLanes + 1) * laneWidth + 8);
 
     const elements = [];
 
     // 1. Vertical passing lines on other lanes
     for (let l = 0; l < this.graph.maxLanes; l++) {
       if (l === lane) continue;
-      const activeBefore = row.lanesBefore[l] !== undefined && row.lanesBefore[l] !== null;
-      const activeAfter = row.lanesAfter[l] !== undefined && row.lanesAfter[l] !== null;
-      if (activeBefore && activeAfter) {
+      // ONLY draw if lane was active before AND after, and held the same commit!
+      if (row.lanesBefore[l] && row.lanesBefore[l] === row.lanesAfter[l]) {
         const col = LANE_COLORS[l % LANE_COLORS.length];
         elements.push(
-          div().absolute().left(l * laneWidth + 9).top(0).bottom(0).w(2).bg(col)
+          div().absolute().left(l * laneWidth + 13).top(0).bottom(0).w(2).bg(col)
         );
       }
     }
 
-    // 2. Incoming vertical line to commit node (top: 0 to top: 13)
+    // 2. Incoming vertical line to commit node (from top)
     if (row.lanesBefore[lane]) {
       elements.push(
         div().absolute().left(laneX - 1).top(0).h(13).w(2).bg(laneColor)
       );
     }
 
-    // 3. Outgoing vertical line to direct parent (top: 13 to bottom: 0)
-    if (row.lanesAfter[lane]) {
+    // 3. Outgoing straight line to primary parent (downwards)
+    const hasStraight = row.outgoing.some(o => o.from === lane && o.to === lane);
+    if (hasStraight) {
       elements.push(
         div().absolute().left(laneX - 1).top(13).bottom(0).w(2).bg(laneColor)
       );
     }
 
-    // 4. Branching & Merging connectors (diagonal / horizontal steps)
-    for (const p of row.parentLanes) {
-      if (p.lane !== lane) {
-        const pColor = LANE_COLORS[p.lane % LANE_COLORS.length];
-        const pX = p.lane * laneWidth + 10;
-        const left = Math.min(laneX, pX);
-        const width = Math.abs(laneX - pX);
-        // Horizontal connecting arm
+    // 4. Branching & Merging connectors with rounded corners
+    for (const o of row.outgoing) {
+      if (o.from === o.to) continue;
+      const fromX = o.from * laneWidth + 14;
+      const toX = o.to * laneWidth + 14;
+      const color = o.type === "fork" ? LANE_COLORS[o.to % LANE_COLORS.length] : LANE_COLORS[o.from % LANE_COLORS.length];
+
+      if (fromX < toX) {
+        // Curve to the right
+        const width = toX - fromX;
         elements.push(
-          div().absolute().left(left).top(12).w(width).h(2).bg(pColor)
+          div().absolute().left(fromX).top(12).w(width + 1).h(14)
+            .border_t(2).border_r(2).border_color(color).rounded_tr(7)
         );
-        // Vertical step down to row bottom on parent lane
+      } else {
+        // Curve to the left
+        const width = fromX - toX;
         elements.push(
-          div().absolute().left(pX - 1).top(13).bottom(0).w(2).bg(pColor)
+          div().absolute().left(toX - 1).top(12).w(width + 1).h(14)
+            .border_t(2).border_l(2).border_color(color).rounded_tl(7)
         );
       }
     }
 
-    // 5. Commit Node Marker
+    // 5. Commit Node Marker (drawn on top of lines)
     if (row.isHead) {
       // SourceTree HEAD style: Outer ring + center dot
       elements.push(
-        div().absolute().left(laneX - 5).top(7).size(12).rounded(6)
+        div().absolute().left(laneX - 6).top(7).size(12).rounded(6)
           .border_2().border_color(laneColor).bg(t.background).flex().items_center().justify_center()
           .child(div().size(4).rounded(2).bg(laneColor))
       );
     } else if (row.isMerge) {
-      // Merge commit marker
+      // Merge commit marker: Donut style with center hole
       elements.push(
-        div().absolute().left(laneX - 4).top(8).size(10).rounded(5)
+        div().absolute().left(laneX - 5).top(8).size(10).rounded(5)
           .bg(laneColor).border_1().border_color(t.background).flex().items_center().justify_center()
-          .child(div().size(3).rounded(1.5).bg(t.background))
+          .child(div().size(4).rounded(2).bg(t.background))
       );
     } else {
       // Standard commit dot
       elements.push(
-        div().absolute().left(laneX - 3.5).top(8.5).size(9).rounded(4.5).bg(laneColor)
+        div().absolute().left(laneX - 4).top(9).size(8).rounded(4).bg(laneColor)
       );
     }
 
@@ -506,8 +531,8 @@ export default class ChangesEnhanced extends View {
     if (key() !== this.context) this.refresh(cx);
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
-    const graphWidth = Math.max(56, (this.graph.maxLanes + 1) * 14 + 10);
-    const tableMinWidth = graphWidth + 260 + 72 + 110 + 115 + 24;
+    const graphWidth = Math.max(64, (this.graph.maxLanes + 1) * 16 + 10);
+    const tableMinWidth = graphWidth + 280 + 74 + 115 + 120 + 24;
 
     const showChanges = this.viewMode === "split" || this.viewMode === "changes";
     const showTree = this.viewMode === "split" || this.viewMode === "tree";
@@ -602,6 +627,41 @@ export default class ChangesEnhanced extends View {
       // ================= SECTION 2: SOURCETREE-STYLE BRANCH TREE =================
       .when(showTree, el => el.child(
         v_flex().id("section-tree").flex_1().min_h(140).border_t(showChanges ? 1 : 0).border_color(t.border).overflow_hidden()
+          // Sub-header for Tree: Scope toggle (All Branches / Current Branch)
+          .child(h_flex().h(30).flex_none().px(12).gap(8).items_center().bg(t.raised).border_b(1).border_color(t.border)
+            .child(svg("mods/changes-enhanced/changes.svg").size(12).text_color(t.muted))
+            .child(div().font_semibold().text_size(11.5).child("Commit History"))
+            .child(div().px(5).py(0.5).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.commits.length} commits`))
+            .child(div().flex_1())
+            // Scope switcher: All Branches vs Current Branch
+            .child(
+              h_flex().h(22).p(2).gap(2).rounded(5).bg(t.surface).border_1().border_color(t.border).flex_none()
+                .child(
+                  div().id("scope-all-btn").px(6).h_full().rounded(3).flex().items_center().cursor_pointer().text_size(10)
+                    .when(this.treeScope === "all", e => e.bg(t.raised).font_semibold().text_color(t.foreground))
+                    .when(this.treeScope !== "all", e => e.text_color(t.dim).hover(s => s.text_color(t.foreground)))
+                    .on_click((_e, cx) => {
+                      if (this.treeScope !== "all") {
+                        this.treeScope = "all";
+                        this.refresh(cx);
+                      }
+                    })
+                    .child("All Branches")
+                )
+                .child(
+                  div().id("scope-branch-btn").px(6).h_full().rounded(3).flex().items_center().cursor_pointer().text_size(10)
+                    .when(this.treeScope === "current", e => e.bg(t.raised).font_semibold().text_color(t.foreground))
+                    .when(this.treeScope !== "current", e => e.text_color(t.dim).hover(s => s.text_color(t.foreground)))
+                    .on_click((_e, cx) => {
+                      if (this.treeScope !== "current") {
+                        this.treeScope = "current";
+                        this.refresh(cx);
+                      }
+                    })
+                    .child("Current Branch")
+                )
+            )
+          )
           // Table container with horizontal scrollbar that scrolls BOTH Header AND Body synchronously
           .child(
             div().id("tree-table-scroll-x").flex_1().min_h(0).overflow_x_scrollbar()
@@ -611,10 +671,10 @@ export default class ChangesEnhanced extends View {
                   .child(
                     h_flex().h(28).flex_none().px(8).gap(6).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(11).font_semibold().text_color(t.muted)
                       .child(div().w(graphWidth).flex_none().px(2).child("Graph"))
-                      .child(div().w(260).flex_1().min_w(200).child("Description"))
-                      .child(div().w(72).flex_none().child("Commit"))
-                      .child(div().w(110).flex_none().child("Author"))
-                      .child(div().w(115).flex_none().child("Date"))
+                      .child(div().w(280).flex_1().min_w(200).child("Description"))
+                      .child(div().w(74).flex_none().child("Commit"))
+                      .child(div().w(115).flex_none().child("Author"))
+                      .child(div().w(120).flex_none().child("Date"))
                   )
                   // Body: Scrollable Commit List (same column widths)
                   .child(
@@ -629,25 +689,25 @@ export default class ChangesEnhanced extends View {
                               .when(!isSelected, e => e.hover(s => s.bg(t.hover)))
                               .on_click((_e, cx) => this.selectCommit(c, cx))
                               // Graph Column (fixed width)
-                              .child(this.renderGraphCell(row, t, 14))
+                              .child(this.renderGraphCell(row, t, 16))
                               // Description Column (flexible, truncated)
                               .child(
-                                h_flex().w(260).flex_1().min_w(200).gap(5).items_center().overflow_hidden()
-                                  .children(c.refs.map(ref => this.renderRefBadge(ref, t)))
-                                  .child(div().flex_1().min_w(0).text_size(11.5).truncate().text_color(t.foreground).child(c.subject))
+                                h_flex().w(280).flex_1().min_w(200).gap(5).items_center().overflow_hidden()
+                                   .children(c.refs.map(ref => this.renderRefBadge(ref, t)))
+                                   .child(div().flex_1().min_w(0).text_size(11.5).truncate().text_color(t.foreground).child(c.subject))
                               )
                               // Commit Hash Column (fixed width)
                               .child(
-                                h_flex().w(72).flex_none().items_center().gap(3)
+                                h_flex().w(74).flex_none().items_center().gap(3)
                                   .child(div().text_size(11).font_family(settings().font_family ?? "JetBrains Mono").text_color(t.dim).child(c.short))
                                   .child(div().size(16).flex().items_center().justify_center().rounded(3).hover(s => s.bg(t.raised))
                                     .on_click((e, cx) => { e.stop_propagation(); this.copyHash(c.hash, cx); })
                                     .child(svg("mods/changes-enhanced/copy.svg").size(10).text_color(t.muted)))
                               )
                               // Author Column (fixed width, truncated)
-                              .child(div().w(110).flex_none().text_size(11).text_color(t.muted).truncate().child(c.author))
+                              .child(div().w(115).flex_none().text_size(11).text_color(t.muted).truncate().child(c.author))
                               // Date Column (fixed width, truncated)
-                              .child(div().w(115).flex_none().text_size(10.5).text_color(t.dim).truncate().child(c.date));
+                              .child(div().w(120).flex_none().text_size(10.5).text_color(t.dim).truncate().child(c.date));
                           })
                         ).when(!this.commits.length, (e) =>
                           e.child(div().p(12).text_color(t.dim).text_size(11).child(this.loadingHistory ? "Loading branch history…" : "No commit history found"))
