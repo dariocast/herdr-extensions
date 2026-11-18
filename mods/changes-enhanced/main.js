@@ -70,6 +70,12 @@ function parseDecorations(raw) {
   return refs;
 }
 
+// Matches full or prefix git hash against active lanes
+function findLane(activeLanes, targetHash) {
+  if (!targetHash) return -1;
+  return activeLanes.findIndex(expected => expected && (expected === targetHash || targetHash.startsWith(expected) || expected.startsWith(targetHash)));
+}
+
 // SourceTree-style Git Graph calculation
 function calculateGraph(commits) {
   const activeLanes = [];
@@ -78,8 +84,8 @@ function calculateGraph(commits) {
   for (let i = 0; i < commits.length; i++) {
     const c = commits[i];
 
-    // 1. Determine lane for current commit
-    let lane = activeLanes.indexOf(c.hash);
+    // 1. Determine lane for current commit (matches full or short hash)
+    let lane = findLane(activeLanes, c.hash);
     if (lane === -1) {
       lane = activeLanes.indexOf(null);
       if (lane === -1) {
@@ -100,7 +106,7 @@ function calculateGraph(commits) {
     } else {
       // Primary parent (p0) continues or joins
       const p0 = c.parents[0];
-      const p0Existing = activeLanes.indexOf(p0);
+      const p0Existing = findLane(activeLanes, p0);
       if (p0Existing !== -1 && p0Existing !== lane) {
         // Joins an already tracked lane -> current lane terminates here
         activeLanes[lane] = null;
@@ -113,7 +119,7 @@ function calculateGraph(commits) {
       // Secondary parents (p1, p2, ... for merge commits)
       for (let p = 1; p < c.parents.length; p++) {
         const pk = c.parents[p];
-        const pkExisting = activeLanes.indexOf(pk);
+        const pkExisting = findLane(activeLanes, pk);
         if (pkExisting !== -1) {
           outgoing.push({ from: lane, to: pkExisting, type: "merge-join" });
         } else {
@@ -268,7 +274,7 @@ export default class ChangesEnhanced extends View {
             "-n", "85",
             "--date-order",
             ...(this.treeScope === "all" ? ["--all"] : []),
-            "--format=%H%x00%h%x00%p%x00%an%x00%ad%x00%ar%x00%s%x00%d",
+            "--format=%H%x00%h%x00%P%x00%an%x00%ad%x00%ar%x00%s%x00%d",
             "--date=format:%Y-%m-%d %H:%M"
           ];
           const logRes = await git(logArgs);
