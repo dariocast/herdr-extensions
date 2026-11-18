@@ -680,28 +680,5 @@ export default class ChangesEnhanced extends View {
               )
           ))
       ));
-          // Commit Details Drawer (when a commit is clicked)
-          .when(Boolean(this.selectedCommit), el => el.child(
-            v_flex().flex_none().max_h(120).p(8).gap(4).bg(t.raised).border_t(1).border_color(t.border).text_size(11)
-              .child(h_flex().items_center().gap(8)
-                .child(div().font_semibold().text_color(t.accent).child(`Commit ${this.selectedCommit.short}`))
-                .child(div().text_color(t.dim).font_family(settings().font_family ?? "JetBrains Mono").text_size(10).child(this.selectedCommit.hash))
-                .child(div().id("copy-selected-hash").px(6).py(1).rounded(4).bg(t.surface).border_1().border_color(t.border).cursor_pointer()
-                  .on_click((_e, cx) => this.copyHash(this.selectedCommit.hash, cx))
-                  .child(this.copiedNotice ? "Copied!" : "Copy Full SHA"))
-                .child(div().flex_1())
-                .child(div().cursor_pointer().text_color(t.dim).hover(s => s.text_color(t.foreground))
-                  .on_click((_e, cx) => { this.selectedCommit = null; cx.notify(); }).child("✕ Close"))
-              )
-              .child(div().font_medium().text_color(t.foreground).child(this.selectedCommit.subject))
-              .child(h_flex().gap(12).text_color(t.muted).text_size(10.5)
-                .child(div().child(`Author: ${this.selectedCommit.author}`))
-                .child(div().child(`Date: ${this.selectedCommit.date} (${this.selectedCommit.relativeDate})`))
-              )
-              .when(Boolean(this.selectedCommitDetails?.statSummary), e =>
-                e.child(div().text_color(t.dim).text_size(10).child(this.selectedCommitDetails.statSummary))
-              )
-          ))
-      ));
   }
 }
