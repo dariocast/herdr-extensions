@@ -23,7 +23,7 @@ herdr-extensions/
         └── gpui-kit.d.ts           # GPUI type definitions
 ```
 
-## Installed Mods
+## Installed Mod
 
 ### `files-enhanced`
 An enhanced replacement for Herdr's built-in `files` mod:

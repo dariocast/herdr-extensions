@@ -418,7 +418,7 @@ export default class ChangesEnhanced extends View {
       if (activeBefore && activeAfter) {
         const col = LANE_COLORS[l % LANE_COLORS.length];
         elements.push(
-          div().key(`pass-${l}`).absolute().left(l * laneWidth + 9).top(0).bottom(0).w(2).bg(col)
+          div().absolute().left(l * laneWidth + 9).top(0).bottom(0).w(2).bg(col)
         );
       }
     }
@@ -426,14 +426,14 @@ export default class ChangesEnhanced extends View {
     // 2. Incoming vertical line to commit node (top: 0 to top: 13)
     if (row.lanesBefore[lane]) {
       elements.push(
-        div().key("in-line").absolute().left(laneX - 1).top(0).h(13).w(2).bg(laneColor)
+        div().absolute().left(laneX - 1).top(0).h(13).w(2).bg(laneColor)
       );
     }
 
     // 3. Outgoing vertical line to direct parent (top: 13 to bottom: 0)
     if (row.lanesAfter[lane]) {
       elements.push(
-        div().key("out-line").absolute().left(laneX - 1).top(13).bottom(0).w(2).bg(laneColor)
+        div().absolute().left(laneX - 1).top(13).bottom(0).w(2).bg(laneColor)
       );
     }
 
@@ -446,11 +446,11 @@ export default class ChangesEnhanced extends View {
         const width = Math.abs(laneX - pX);
         // Horizontal connecting arm
         elements.push(
-          div().key(`merge-arm-${p.lane}`).absolute().left(left).top(12).w(width).h(2).bg(pColor)
+          div().absolute().left(left).top(12).w(width).h(2).bg(pColor)
         );
         // Vertical step down to row bottom on parent lane
         elements.push(
-          div().key(`merge-down-${p.lane}`).absolute().left(pX - 1).top(13).bottom(0).w(2).bg(pColor)
+          div().absolute().left(pX - 1).top(13).bottom(0).w(2).bg(pColor)
         );
       }
     }
@@ -459,21 +459,21 @@ export default class ChangesEnhanced extends View {
     if (row.isHead) {
       // SourceTree HEAD style: Outer ring + center dot
       elements.push(
-        div().key("node-head").absolute().left(laneX - 5).top(7).size(12).rounded(6)
+        div().absolute().left(laneX - 5).top(7).size(12).rounded(6)
           .border_2().border_color(laneColor).bg(t.background).flex().items_center().justify_center()
           .child(div().size(4).rounded(2).bg(laneColor))
       );
     } else if (row.isMerge) {
       // Merge commit marker
       elements.push(
-        div().key("node-merge").absolute().left(laneX - 4).top(8).size(10).rounded(5)
+        div().absolute().left(laneX - 4).top(8).size(10).rounded(5)
           .bg(laneColor).border_1().border_color(t.background).flex().items_center().justify_center()
           .child(div().size(3).rounded(1.5).bg(t.background))
       );
     } else {
       // Standard commit dot
       elements.push(
-        div().key("node-dot").absolute().left(laneX - 3.5).top(8.5).size(9).rounded(4.5).bg(laneColor)
+        div().absolute().left(laneX - 3.5).top(8.5).size(9).rounded(4.5).bg(laneColor)
       );
     }
 
@@ -483,19 +483,19 @@ export default class ChangesEnhanced extends View {
   // Ref badges (branches and tags)
   renderRefBadge(ref, t) {
     if (ref.type === "tag") {
-      return h_flex().key(`tag-${ref.name}`).h(18).px(5).gap(3).items_center().rounded(4)
+      return h_flex().id(`tag-${ref.name}`).h(18).px(5).gap(3).items_center().rounded(4)
         .bg("#10b9811c").border_1().border_color("#10b98166").text_size(10.5).text_color("#10b981")
         .child(svg("mods/changes-enhanced/tag.svg").size(10))
         .child(div().truncate().max_w(130).child(ref.name));
     }
     if (ref.type === "remote") {
-      return h_flex().key(`rem-${ref.name}`).h(18).px(5).gap(3).items_center().rounded(4)
+      return h_flex().id(`rem-${ref.name}`).h(18).px(5).gap(3).items_center().rounded(4)
         .bg("#f973161c").border_1().border_color("#f9731666").text_size(10.5).text_color("#f97316")
         .child(svg("mods/changes-enhanced/changes.svg").size(10))
         .child(div().truncate().max_w(150).child(ref.name));
     }
     // Local branch / HEAD
-    return h_flex().key(`br-${ref.name}`).h(18).px(5).gap(3).items_center().rounded(4)
+    return h_flex().id(`br-${ref.name}`).h(18).px(5).gap(3).items_center().rounded(4)
       .bg(ref.isHead ? "#3b82f62b" : "#3b82f61c").border_1().border_color(ref.isHead ? "#3b82f6aa" : "#3b82f666")
       .text_size(10.5).text_color("#3b82f6")
       .child(svg("mods/changes-enhanced/changes.svg").size(10))
