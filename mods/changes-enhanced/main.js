@@ -507,6 +507,7 @@ export default class ChangesEnhanced extends View {
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
     const graphWidth = Math.max(56, (this.graph.maxLanes + 1) * 14 + 10);
+    const tableMinWidth = graphWidth + 260 + 72 + 110 + 115 + 24;
 
     const showChanges = this.viewMode === "split" || this.viewMode === "changes";
     const showTree = this.viewMode === "split" || this.viewMode === "tree";
@@ -519,18 +520,18 @@ export default class ChangesEnhanced extends View {
 
       // Top Master Header
       .child(h_flex().h(40).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border).bg(t.chrome)
-        .child(div().font_semibold().text_size(13).child("Git Changes & Tree"))
+        .child(div().font_semibold().text_size(13).flex_none().child("Changes & Tree"))
         .when(Boolean(this.currentBranch), el =>
-          el.child(h_flex().px(6).py(1).gap(4).rounded(4).bg(t.surface).border_1().border_color(t.border).items_center()
-            .child(svg("mods/changes-enhanced/changes.svg").size(11).text_color(t.accent))
-            .child(div().text_size(11).font_family(settings().font_family ?? "JetBrains Mono").text_color(t.foreground).child(this.currentBranch)))
+          el.child(h_flex().px(6).py(1).gap(4).rounded(4).bg(t.surface).border_1().border_color(t.border).items_center().flex_none().max_w(140)
+            .child(svg("mods/changes-enhanced/changes.svg").size(11).text_color(t.accent).flex_none())
+            .child(div().text_size(11).font_family(settings().font_family ?? "JetBrains Mono").text_color(t.foreground).truncate().child(this.currentBranch)))
         )
         .when(Boolean(this.branchAheadBehind), el =>
-          el.child(div().text_size(10).px(4).py(1).rounded(3).bg(t.raised).text_color(t.dim).child(this.branchAheadBehind))
+          el.child(div().text_size(10).px(4).py(1).rounded(3).bg(t.raised).text_color(t.dim).flex_none().child(this.branchAheadBehind))
         )
         .child(div().flex_1())
         // View Mode Switcher: Changes / Split / Tree
-        .child(h_flex().gap(2).p(2).rounded(6).bg(t.surface).border_1().border_color(t.border)
+        .child(h_flex().gap(2).p(2).rounded(6).bg(t.surface).border_1().border_color(t.border).flex_none()
           .child(div().id("btn-mode-changes").px(6).py(1).rounded(4).text_size(10.5).cursor_pointer()
             .when(this.viewMode === "changes", e => e.bg(t.raised).font_semibold().text_color(t.foreground))
             .when(this.viewMode !== "changes", e => e.text_color(t.dim).hover(s => s.text_color(t.foreground)))
@@ -543,7 +544,7 @@ export default class ChangesEnhanced extends View {
             .when(this.viewMode === "tree", e => e.bg(t.raised).font_semibold().text_color(t.foreground))
             .when(this.viewMode !== "tree", e => e.text_color(t.dim).hover(s => s.text_color(t.foreground)))
             .on_click((_e, cx) => { this.viewMode = "tree"; cx.notify(); }).child("Tree")))
-        .child(div().id("refresh-btn").size(24).flex().items_center().justify_center().rounded(5).cursor_pointer()
+        .child(div().id("refresh-btn").size(24).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
           .hover(s => s.bg(t.hover)).on_click((_e, cx) => this.refresh(cx))
           .child(svg("mods/changes-enhanced/refresh.svg").size(13).text_color(t.muted)))
       )
@@ -570,9 +571,14 @@ export default class ChangesEnhanced extends View {
                 return h_flex().id(`change-${f.path}`).h(25).flex_none().px(8).gap(6).items_center().rounded(5).cursor_pointer()
                   .when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
                   .child(div().w(14).text_size(10.5).font_semibold().text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
-                  .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).text_size(11).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(240).min_w(0).text_size(11).truncate().child(name)))
-                  .when(f.add > 0, (e) => e.child(div().text_size(10).text_color(t.ansi2).child(`+${f.add}`)))
-                  .when(f.del > 0, (e) => e.child(div().text_size(10).text_color(t.ansi1).child(`−${f.del}`)));
+                  .child(h_flex().flex_1().min_w(0).items_center().gap(2)
+                    .when(parts.length > 0, el => el.child(div().text_color(t.dim).text_size(11).truncate().max_w(100).child(parts.join("/") + "/")))
+                    .child(div().flex_1().min_w(0).text_size(11).truncate().child(name))
+                  )
+                  .child(h_flex().gap(4).flex_none()
+                    .when(f.add > 0, (e) => e.child(div().text_size(10).text_color(t.ansi2).child(`+${f.add}`)))
+                    .when(f.del > 0, (e) => e.child(div().text_size(10).text_color(t.ansi1).child(`−${f.del}`)))
+                  );
               })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).text_size(11).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No uncommitted changes" : "No folder")))))
               .child(Scrollbar.vertical("changes-list").absolute().inset_0())
             )
@@ -596,50 +602,84 @@ export default class ChangesEnhanced extends View {
       // ================= SECTION 2: SOURCETREE-STYLE BRANCH TREE =================
       .when(showTree, el => el.child(
         v_flex().id("section-tree").flex_1().min_h(140).border_t(showChanges ? 1 : 0).border_color(t.border).overflow_hidden()
-          // SourceTree Columns Header
-          .child(h_flex().h(28).flex_none().px(8).gap(6).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(11).font_semibold().text_color(t.muted)
-            .child(div().w(graphWidth).flex_none().px(2).child("Graph"))
-            .child(div().flex_1().min_w(0).child("Description"))
-            .child(div().w(68).flex_none().child("Commit"))
-            .child(div().w(110).flex_none().child("Author"))
-            .child(div().w(105).flex_none().child("Date"))
+          // Table container with horizontal scrollbar that scrolls BOTH Header AND Body synchronously
+          .child(
+            div().id("tree-table-scroll-x").flex_1().min_h(0).overflow_x_scrollbar()
+              .child(
+                v_flex().h_full().min_w(tableMinWidth)
+                  // Synchronized Header (inside horizontal scroll)
+                  .child(
+                    h_flex().h(28).flex_none().px(8).gap(6).items_center().bg(t.raised).border_b(1).border_color(t.border).text_size(11).font_semibold().text_color(t.muted)
+                      .child(div().w(graphWidth).flex_none().px(2).child("Graph"))
+                      .child(div().w(260).flex_1().min_w(200).child("Description"))
+                      .child(div().w(72).flex_none().child("Commit"))
+                      .child(div().w(110).flex_none().child("Author"))
+                      .child(div().w(115).flex_none().child("Date"))
+                  )
+                  // Body: Scrollable Commit List (same column widths)
+                  .child(
+                    div().flex_1().min_h(0).relative()
+                      .child(
+                        v_flex().id("commit-tree-list").absolute().inset_0().overflow_y_scroll().children(
+                          this.graph.rows.map((row) => {
+                            const c = row.commit;
+                            const isSelected = this.selectedCommit?.hash === c.hash;
+                            return h_flex().id(`commit-row-${c.hash}`).h(26).flex_none().px(8).gap(6).items_center().cursor_pointer()
+                              .when(isSelected, e => e.bg(t.selected))
+                              .when(!isSelected, e => e.hover(s => s.bg(t.hover)))
+                              .on_click((_e, cx) => this.selectCommit(c, cx))
+                              // Graph Column (fixed width)
+                              .child(this.renderGraphCell(row, t, 14))
+                              // Description Column (flexible, truncated)
+                              .child(
+                                h_flex().w(260).flex_1().min_w(200).gap(5).items_center().overflow_hidden()
+                                  .children(c.refs.map(ref => this.renderRefBadge(ref, t)))
+                                  .child(div().flex_1().min_w(0).text_size(11.5).truncate().text_color(t.foreground).child(c.subject))
+                              )
+                              // Commit Hash Column (fixed width)
+                              .child(
+                                h_flex().w(72).flex_none().items_center().gap(3)
+                                  .child(div().text_size(11).font_family(settings().font_family ?? "JetBrains Mono").text_color(t.dim).child(c.short))
+                                  .child(div().size(16).flex().items_center().justify_center().rounded(3).hover(s => s.bg(t.raised))
+                                    .on_click((e, cx) => { e.stop_propagation(); this.copyHash(c.hash, cx); })
+                                    .child(svg("mods/changes-enhanced/copy.svg").size(10).text_color(t.muted)))
+                              )
+                              // Author Column (fixed width, truncated)
+                              .child(div().w(110).flex_none().text_size(11).text_color(t.muted).truncate().child(c.author))
+                              // Date Column (fixed width, truncated)
+                              .child(div().w(115).flex_none().text_size(10.5).text_color(t.dim).truncate().child(c.date));
+                          })
+                        ).when(!this.commits.length, (e) =>
+                          e.child(div().p(12).text_color(t.dim).text_size(11).child(this.loadingHistory ? "Loading branch history…" : "No commit history found"))
+                        )
+                      )
+                      .child(Scrollbar.vertical("commit-tree-list").absolute().inset_0())
+                  )
+              )
           )
-          // Table Body: Virtualized / Scrollable Commit Rows
-          .child(div().flex_1().min_h(0).relative().overflow_x_scroll()
-            .child(div().min_w(520).size_full().relative()
-              .child(v_flex().id("commit-tree-list").absolute().inset_0().overflow_y_scroll().children(
-                this.graph.rows.map((row) => {
-                  const c = row.commit;
-                  const isSelected = this.selectedCommit?.hash === c.hash;
-                  return h_flex().id(`commit-row-${c.hash}`).h(26).flex_none().px(8).gap(6).items_center().cursor_pointer()
-                    .when(isSelected, e => e.bg(t.selected))
-                    .when(!isSelected, e => e.hover(s => s.bg(t.hover)))
-                    .on_click((_e, cx) => this.selectCommit(c, cx))
-                    // Graph Column
-                    .child(this.renderGraphCell(row, t, 14))
-                    // Description Column (Ref Badges + Commit Message)
-                    .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-                      .children(c.refs.map(ref => this.renderRefBadge(ref, t)))
-                      .child(div().flex_1().min_w(0).text_size(11.5).truncate().text_color(isSelected ? t.foreground : t.foreground).child(c.subject))
-                    )
-                    // Commit Hash Column
-                    .child(h_flex().w(68).flex_none().items_center().gap(3)
-                      .child(div().text_size(11).font_family(settings().font_family ?? "JetBrains Mono").text_color(t.dim).child(c.short))
-                      .child(div().size(16).flex().items_center().justify_center().rounded(3).hover(s => s.bg(t.raised))
-                        .on_click((e, cx) => { e.stop_propagation(); this.copyHash(c.hash, cx); })
-                        .child(svg("mods/changes-enhanced/copy.svg").size(10).text_color(t.muted)))
-                    )
-                    // Author Column
-                    .child(div().w(110).flex_none().text_size(11).text_color(t.muted).truncate().child(c.author))
-                    // Date Column
-                    .child(div().w(105).flex_none().text_size(10.5).text_color(t.dim).truncate().child(c.date));
-                })
-              ).when(!this.commits.length, (e) =>
-                e.child(div().p(12).text_color(t.dim).text_size(11).child(this.loadingHistory ? "Loading branch history…" : "No commit history found"))
-              ))
-              .child(Scrollbar.vertical("commit-tree-list").absolute().inset_0())
-            )
-          )
+          // Commit Details Drawer (when a commit is clicked)
+          .when(Boolean(this.selectedCommit), el => el.child(
+            v_flex().flex_none().max_h(120).p(8).gap(4).bg(t.raised).border_t(1).border_color(t.border).text_size(11)
+              .child(h_flex().items_center().gap(8)
+                .child(div().font_semibold().text_color(t.accent).child(`Commit ${this.selectedCommit.short}`))
+                .child(div().text_color(t.dim).font_family(settings().font_family ?? "JetBrains Mono").text_size(10).child(this.selectedCommit.hash))
+                .child(div().id("copy-selected-hash").px(6).py(1).rounded(4).bg(t.surface).border_1().border_color(t.border).cursor_pointer()
+                  .on_click((_e, cx) => this.copyHash(this.selectedCommit.hash, cx))
+                  .child(this.copiedNotice ? "Copied!" : "Copy Full SHA"))
+                .child(div().flex_1())
+                .child(div().cursor_pointer().text_color(t.dim).hover(s => s.text_color(t.foreground))
+                  .on_click((_e, cx) => { this.selectedCommit = null; cx.notify(); }).child("✕ Close"))
+              )
+              .child(div().font_medium().text_color(t.foreground).truncate().child(this.selectedCommit.subject))
+              .child(h_flex().gap(12).text_color(t.muted).text_size(10.5)
+                .child(div().truncate().child(`Author: ${this.selectedCommit.author}`))
+                .child(div().truncate().child(`Date: ${this.selectedCommit.date} (${this.selectedCommit.relativeDate})`))
+              )
+              .when(Boolean(this.selectedCommitDetails?.statSummary), e =>
+                e.child(div().text_color(t.dim).text_size(10).truncate().child(this.selectedCommitDetails.statSummary))
+              )
+          ))
+      ));
           // Commit Details Drawer (when a commit is clicked)
           .when(Boolean(this.selectedCommit), el => el.child(
             v_flex().flex_none().max_h(120).p(8).gap(4).bg(t.raised).border_t(1).border_color(t.border).text_size(11)
